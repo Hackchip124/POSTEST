@@ -9,4 +9,6 @@ pytz==2023.3.post1
 python-dateutil==2.8.2
 uuid==1.30
 pywin32==306; sys_platform == 'win32'
-opencv-python-headless==4.9.0.80 
+pyzbar>=0.1.9  # For barcode scanning
+opencv-python-headless>=4.8.1  # For image processing (cloud-friendly)
+Pillow>=10.1.0  # Alternative image processing
