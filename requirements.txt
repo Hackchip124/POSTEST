@@ -19,3 +19,9 @@ opencv-python-headless==4.9.0.80  # Headless version for cloud
 pywin32==306; sys_platform == 'win32'
 pywin32==302; sys_platform == 'win32'  # Older stable version
 pywin32==310; sys_platform == 'win32'  # Newer version
+# For Windows
+pywin32>=300,<=310; sys_platform == 'win32'
+
+# For all platforms
+fpdf2>=2.7.4
+streamlit>=1.32.0
