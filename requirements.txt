@@ -16,3 +16,6 @@ pyzbar>=0.1.9 ; sys_platform != 'linux'
 pylibdmtx>=0.1.10  # Alternative barcode reader
 opencv-python-headless>=4.8.1
 opencv-python-headless==4.9.0.80  # Headless version for cloud
+pywin32==306; sys_platform == 'win32'
+pywin32==302; sys_platform == 'win32'  # Older stable version
+pywin32==310; sys_platform == 'win32'  # Newer version
