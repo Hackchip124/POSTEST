@@ -170,29 +170,69 @@ def get_available_com_ports():
     ports = serial.tools.list_ports.comports()
     return [port.device for port in ports] + ["auto"]
 
+import platform
+import streamlit as st
+import tempfile
+from fpdf import FPDF
+import streamlit.components.v1 as components
+
 def print_receipt(receipt_text):
-    settings = load_data(SETTINGS_FILE)
-    printer_name = settings.get('printer_name', '')
+    """Cross-platform printing solution with 3 fallback methods"""
     
-    if not printer_name:
-        st.warning("No printer configured in settings")
-        return False
-    
-    try:
-        hprinter = win32print.OpenPrinter(printer_name)
+    # 1. Try Windows native printing (only on Windows)
+    if platform.system() == "Windows":
         try:
-            win32print.StartDocPrinter(hprinter, 1, ("POS Receipt", None, "RAW"))
+            import win32print
+            import win32con
+            
+            printer_name = win32print.GetDefaultPrinter()
+            hprinter = win32print.OpenPrinter(printer_name)
+            
             try:
+                win32print.StartDocPrinter(hprinter, 1, ("POS Receipt", None, "RAW"))
                 win32print.StartPagePrinter(hprinter)
                 win32print.WritePrinter(hprinter, receipt_text.encode('utf-8'))
-                win32print.EndPagePrinter(hprinter)
+                st.success("Sent to printer successfully!")
+                return True
             finally:
+                win32print.EndPagePrinter(hprinter)
                 win32print.EndDocPrinter(hprinter)
-        finally:
-            win32print.ClosePrinter(hprinter)
+                win32print.ClosePrinter(hprinter)
+                
+        except ImportError:
+            pass  # Fall through to other methods
+    
+    # 2. Browser-based printing (works in cloud)
+    try:
+        js = f"""
+        <script>
+        function printReceipt() {{
+            var win = window.open('', '', 'height=400,width=600');
+            win.document.write(`<pre>{receipt_text}</pre>`);
+            win.document.close();
+            win.print();
+        }}
+        printReceipt();
+        </script>
+        """
+        components.html(js, height=0)
+        return True
+    except:
+        pass
+    
+    # 3. PDF generation fallback (always works)
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.multi_cell(0, 10, receipt_text)
+        pdf_path = "receipt.pdf"
+        pdf.output(pdf_path)
+        with open(pdf_path, "rb") as f:
+            st.download_button("Download Receipt (PDF)", f, "receipt.pdf")
         return True
     except Exception as e:
-        st.error(f"Failed to print: {str(e)}")
+        st.error(f"Printing failed: {str(e)}")
         return False
 
 def open_cash_drawer():
