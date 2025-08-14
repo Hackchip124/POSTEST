@@ -8,3 +8,4 @@ pyserial==3.5
 pytz==2023.3.post1
 python-dateutil==2.8.2
 uuid==1.30
+pywin32==306; sys_platform == 'win32'
