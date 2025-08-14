@@ -15,9 +15,6 @@ import base64
 import uuid
 import cv2
 import pyzbar.pyzbar as pyzbar
-import win32print
-import win32api
-import win32con
 import tempfile
 import pytz
 from datetime import timedelta
@@ -27,7 +24,7 @@ import subprocess
 import threading
 import platform
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import streamlit.components.v1 as components
+
 # Constants
 DATA_DIR = "data"
 BACKUP_DIR = "backups"
@@ -177,9 +174,9 @@ from fpdf import FPDF
 import streamlit.components.v1 as components
 
 def print_receipt(receipt_text):
-    """Universal printing function that works everywhere"""
+    """Cross-platform printing solution with 3 fallback methods"""
     
-    # 1. Windows Printing (only works on Windows)
+    # 1. Try Windows native printing (only on Windows)
     if platform.system() == "Windows":
         try:
             import win32print
@@ -189,40 +186,47 @@ def print_receipt(receipt_text):
             hprinter = win32print.OpenPrinter(printer_name)
             
             try:
-                win32print.StartDocPrinter(hprinter, 1, ("Receipt", None, "RAW"))
+                win32print.StartDocPrinter(hprinter, 1, ("POS Receipt", None, "RAW"))
                 win32print.StartPagePrinter(hprinter)
                 win32print.WritePrinter(hprinter, receipt_text.encode('utf-8'))
+                st.success("Sent to printer successfully!")
                 return True
             finally:
                 win32print.EndPagePrinter(hprinter)
                 win32print.EndDocPrinter(hprinter)
                 win32print.ClosePrinter(hprinter)
+                
         except ImportError:
             pass  # Fall through to other methods
     
-    # 2. Browser Printing (works in Streamlit Cloud)
+    # 2. Browser-based printing (works in cloud)
     try:
-        components.html(f"""
+        js = f"""
         <script>
-        var win = window.open('', '', 'height=400,width=600');
-        win.document.write(`<pre>{receipt_text}</pre>`);
-        win.document.close(); 
-        win.print();
+        function printReceipt() {{
+            var win = window.open('', '', 'height=400,width=600');
+            win.document.write(`<pre>{receipt_text}</pre>`);
+            win.document.close();
+            win.print();
+        }}
+        printReceipt();
         </script>
-        """, height=0)
+        """
+        components.html(js, height=0)
         return True
     except:
         pass
     
-    # 3. PDF Fallback (always works)
+    # 3. PDF generation fallback (always works)
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
         pdf.multi_cell(0, 10, receipt_text)
-        pdf.output("receipt.pdf")
-        with open("receipt.pdf", "rb") as f:
-            st.download_button("Download Receipt", f, "receipt.pdf")
+        pdf_path = "receipt.pdf"
+        pdf.output(pdf_path)
+        with open(pdf_path, "rb") as f:
+            st.download_button("Download Receipt (PDF)", f, "receipt.pdf")
         return True
     except Exception as e:
         st.error(f"Printing failed: {str(e)}")
