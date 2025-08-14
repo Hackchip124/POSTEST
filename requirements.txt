@@ -8,7 +8,6 @@ pyserial==3.5
 pytz==2023.3.post1
 python-dateutil==2.8.2
 uuid==1.30
-pywin32==306; sys_platform == 'win32'
 pyzbar>=0.1.9  # For barcode scanning
 opencv-python-headless>=4.8.1  # For image processing (cloud-friendly)
 Pillow>=10.1.0  # Alternative image processing
@@ -16,12 +15,6 @@ pyzbar>=0.1.9 ; sys_platform != 'linux'
 pylibdmtx>=0.1.10  # Alternative barcode reader
 opencv-python-headless>=4.8.1
 opencv-python-headless==4.9.0.80  # Headless version for cloud
-pywin32==306; sys_platform == 'win32'
-pywin32==302; sys_platform == 'win32'  # Older stable version
-pywin32==310; sys_platform == 'win32'  # Newer version
-# For Windows
-pywin32>=300,<=310; sys_platform == 'win32'
-
-# For all platforms
-fpdf2>=2.7.4
-streamlit>=1.32.0
+streamlit-webrtc>=0.44.4
+opencv-python-headless>=4.8.1
+numpy>=1.26.3
