@@ -15,6 +15,9 @@ import base64
 import uuid
 import cv2
 import pyzbar.pyzbar as pyzbar
+import win32print
+import win32api
+import win32con
 import tempfile
 import pytz
 from datetime import timedelta

@@ -18,3 +18,4 @@ opencv-python-headless==4.9.0.80  # Headless version for cloud
 streamlit-webrtc>=0.44.4
 opencv-python-headless>=4.8.1
 numpy>=1.26.3
+pywin32
