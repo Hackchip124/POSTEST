@@ -1,21 +1,10 @@
 streamlit==1.32.0
+streamlit-webrtc==0.47.0
 pandas==2.1.4
 numpy==1.26.3
 Pillow==10.1.0
-opencv-python==4.8.1.78
 pyzbar==0.1.9
-pyserial==3.5
 pytz==2023.3.post1
+fpdf2==2.7.7
 python-dateutil==2.8.2
-uuid==1.30
-pyzbar>=0.1.9  # For barcode scanning
-opencv-python-headless>=4.8.1  # For image processing (cloud-friendly)
-Pillow>=10.1.0  # Alternative image processing
-pyzbar>=0.1.9 ; sys_platform != 'linux'
-pylibdmtx>=0.1.10  # Alternative barcode reader
-opencv-python-headless>=4.8.1
-opencv-python-headless==4.9.0.80  # Headless version for cloud
-streamlit-webrtc>=0.44.4
-opencv-python-headless>=4.8.1
-numpy>=1.26.3
-pywin32
+opencv-python-headless==4.8.1.78
