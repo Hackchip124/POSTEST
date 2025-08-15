@@ -1,4 +1,3 @@
-# Import all necessary libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,21 +9,17 @@ import os
 import shutil
 import zipfile
 from PIL import Image
+import fpdf as FPDF
 import io
 import base64
 import uuid
-import cv2
-import pyzbar.pyzbar as pyzbar
-
-import tempfile
-import pytz
-from datetime import timedelta
 import serial
 import serial.tools.list_ports
 import subprocess
 import threading
 import platform
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import pytz
+from datetime import timedelta
 
 # Constants
 DATA_DIR = "data"
@@ -42,10 +37,10 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 SUPPLIERS_FILE = os.path.join(DATA_DIR, "suppliers.json")
 SHIFTS_FILE = os.path.join(DATA_DIR, "shifts.json")
 CASH_DRAWER_FILE = os.path.join(DATA_DIR, "cash_drawer.json")
+RETURNS_FILE = os.path.join(DATA_DIR, "returns.json")
 
 # Authentication functions
 def hash_password(password):
-    """Hash a password using SHA-256."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_user(username, password):
@@ -116,7 +111,7 @@ def initialize_empty_data():
             "subcategories": {}
         },
         SETTINGS_FILE: {
-            "store_name": "",
+            "store_name": "Supermarket POS",
             "store_address": "",
             "store_phone": "",
             "store_email": "",
@@ -126,8 +121,8 @@ def initialize_empty_data():
             "receipt_template": "Simple",
             "theme": "Light",
             "session_timeout": 30,
-            "printer_name": "",
-            "barcode_scanner": "camera",
+            "printer_name": "Browser Printer",
+            "barcode_scanner": "keyboard",
             "timezone": "UTC",
             "currency_symbol": "$",
             "decimal_places": 2,
@@ -144,7 +139,8 @@ def initialize_empty_data():
         CASH_DRAWER_FILE: {
             "current_balance": 0.0,
             "transactions": []
-        }
+        },
+        RETURNS_FILE: {}
     }
     
     for file, data in default_data.items():
@@ -158,49 +154,32 @@ initialize_empty_data()
 def get_available_printers():
     printers = []
     try:
-        for printer in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL, None, 1):
-            printers.append(printer[2])
+        if platform.system() == "Windows":
+            try:
+                result = subprocess.run(['wmic', 'printer', 'get', 'name'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    printers = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            except:
+                pass
+        else:
+            try:
+                result = subprocess.run(['lpstat', '-a'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    printers = [line.split()[0] for line in result.stdout.splitlines()]
+            except:
+                pass
     except:
         printers = ["No printers found"]
-    return printers
+    return printers if printers else ["No printers found"]
 
 def get_available_com_ports():
     ports = serial.tools.list_ports.comports()
     return [port.device for port in ports] + ["auto"]
 
-import platform
-import streamlit as st
-import tempfile
-from fpdf import FPDF
-import streamlit.components.v1 as components
-
 def print_receipt(receipt_text):
-    """Cross-platform printing solution with 3 fallback methods"""
+    settings = load_data(SETTINGS_FILE)
     
-    # 1. Try Windows native printing (only on Windows)
-    if platform.system() == "Windows":
-        try:
-            import win32print
-            import win32con
-            
-            printer_name = win32print.GetDefaultPrinter()
-            hprinter = win32print.OpenPrinter(printer_name)
-            
-            try:
-                win32print.StartDocPrinter(hprinter, 1, ("POS Receipt", None, "RAW"))
-                win32print.StartPagePrinter(hprinter)
-                win32print.WritePrinter(hprinter, receipt_text.encode('utf-8'))
-                st.success("Sent to printer successfully!")
-                return True
-            finally:
-                win32print.EndPagePrinter(hprinter)
-                win32print.EndDocPrinter(hprinter)
-                win32print.ClosePrinter(hprinter)
-                
-        except ImportError:
-            pass  # Fall through to other methods
-    
-    # 2. Browser-based printing (works in cloud)
+    # 1. Browser-based printing
     try:
         js = f"""
         <script>
@@ -213,12 +192,12 @@ def print_receipt(receipt_text):
         printReceipt();
         </script>
         """
-        components.html(js, height=0)
+        st.components.v1.html(js, height=0)
         return True
     except:
         pass
     
-    # 3. PDF generation fallback (always works)
+    # 2. PDF fallback
     try:
         pdf = FPDF()
         pdf.add_page()
@@ -249,7 +228,7 @@ def open_cash_drawer():
         st.error(f"Failed to open cash drawer: {str(e)}")
         return False
 
-# Barcode scanner functions
+# Improved Barcode Scanner
 class BarcodeScanner:
     def __init__(self):
         self.scanner = None
@@ -258,115 +237,30 @@ class BarcodeScanner:
         self.last_barcode = ""
         self.last_scan_time = 0
         self.scan_buffer = ""
-        self.frame_placeholder = None
-        
-    def init_camera_scanner(self):
-        self.scanner = cv2.VideoCapture(0)
-        if not self.scanner.isOpened():
-            st.error("Failed to open camera")
-            return False
-        
-        # Set camera properties for better scanning
-        self.scanner.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.scanner.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.scanner.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-        self.scanner.set(cv2.CAP_PROP_FOCUS, 0)
-        return True
-    
-    def start_camera_scanning(self):
-        self.running = True
-        self.frame_placeholder = st.empty()  # Create an empty placeholder for the camera frame
-        
-        while self.running:
-            ret, frame = self.scanner.read()
-            if not ret:
-                continue
-            
-            # Add margin and guide for better scanning
-            margin_size = 100
-            color = (0, 255, 0)  # Green
-            frame_with_margin = cv2.copyMakeBorder(
-                frame, 
-                margin_size, margin_size, margin_size, margin_size, 
-                cv2.BORDER_CONSTANT, 
-                value=color
-            )
-            
-            # Add guide rectangle
-            center_x = frame_with_margin.shape[1] // 2
-            center_y = frame_with_margin.shape[0] // 2
-            guide_size = 400
-            cv2.rectangle(
-                frame_with_margin,
-                (center_x - guide_size//2, center_y - guide_size//2),
-                (center_x + guide_size//2, center_y + guide_size//2),
-                color,
-                2
-            )
-            
-            # Add instruction text
-            cv2.putText(
-                frame_with_margin,
-                "Align barcode within the green box",
-                (margin_size + 10, margin_size - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2
-            )
-            
-            # Display the frame in Streamlit
-            self.frame_placeholder.image(frame_with_margin, channels="BGR", use_column_width=True)
-            
-            # Process the original frame (without margin) for barcode detection
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            barcodes = pyzbar.decode(gray)
-            
-            for barcode in barcodes:
-                barcode_data = barcode.data.decode("utf-8")
-                barcode_type = barcode.type
-                if barcode_data and barcode_data != self.last_barcode:
-                    self.last_barcode = barcode_data
-                    self.last_scan_time = time.time()
-                    self.stop_scanning()
-                    return barcode_data
-            
-            time.sleep(0.1)
-        
-        # Clean up
-        if self.frame_placeholder:
-            self.frame_placeholder.empty()
-        if isinstance(self.scanner, cv2.VideoCapture):
-            self.scanner.release()
-        cv2.destroyAllWindows()
-    
-    def stop_scanning(self):
-        self.running = False
-        if isinstance(self.scanner, cv2.VideoCapture):
-            self.scanner.release()
-        if self.scanner_thread and self.scanner_thread.is_alive():
-            self.scanner_thread.join()
-    
-    def get_barcode(self):
-        if time.time() - self.last_scan_time < 1:  # 1 second debounce
-            barcode = self.last_barcode
-            self.last_barcode = ""
-            return barcode
-        return None
     
     def init_serial_scanner(self, port='auto'):
         if port == 'auto':
             ports = serial.tools.list_ports.comports()
             if not ports:
-                st.error("No serial ports found")
+                st.warning("No serial ports found")
                 return False
             port = ports[0].device
         
         try:
-            self.scanner = serial.Serial(port, 9600, timeout=1)
+            self.scanner = serial.Serial(
+                port=port,
+                baudrate=9600,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1,
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False
+            )
             return True
         except Exception as e:
-            st.error(f"Failed to open serial port: {str(e)}")
+            st.error(f"Failed to open serial port {port}: {str(e)}")
             return False
     
     def start_serial_scanning(self):
@@ -378,25 +272,45 @@ class BarcodeScanner:
                     if data:
                         self.last_barcode = data
                         self.last_scan_time = time.time()
-            except:
+                        st.session_state.scanned_barcode = data
+            except Exception as e:
                 time.sleep(0.1)
+    
+    def stop_scanning(self):
+        self.running = False
+        if self.scanner and hasattr(self.scanner, 'close'):
+            self.scanner.close()
+        if self.scanner_thread and self.scanner_thread.is_alive():
+            self.scanner_thread.join()
+    
+    def get_barcode(self):
+        if time.time() - self.last_scan_time < 1:  # 1 second debounce
+            barcode = self.last_barcode
+            self.last_barcode = ""
+            return barcode
+        return None
 
 # Initialize barcode scanner
 barcode_scanner = BarcodeScanner()
 
 def setup_barcode_scanner():
     settings = load_data(SETTINGS_FILE)
-    scanner_type = settings.get('barcode_scanner', 'camera')
+    scanner_type = settings.get('barcode_scanner', 'keyboard')
     port = settings.get('barcode_scanner_port', 'auto')
     
     if scanner_type == 'serial':
         if barcode_scanner.init_serial_scanner(port):
-            barcode_scanner.scanner_thread = threading.Thread(target=barcode_scanner.start_serial_scanning)
+            barcode_scanner.scanner_thread = threading.Thread(
+                target=barcode_scanner.start_serial_scanning, 
+                daemon=True
+            )
             barcode_scanner.scanner_thread.start()
-    elif scanner_type == 'camera':
-        if barcode_scanner.init_camera_scanner():
-            barcode_scanner.scanner_thread = threading.Thread(target=barcode_scanner.start_camera_scanning)
-            barcode_scanner.scanner_thread.start()
+            st.session_state.barcode_scanner_setup = True
+            st.session_state.scanner_status = "Connected"
+        else:
+            st.session_state.scanner_status = "Disconnected"
+    else:
+        st.session_state.scanner_status = "Keyboard Mode"
 
 # Backup and Restore functions
 def create_backup():
@@ -413,7 +327,6 @@ def create_backup():
     return backup_path
 
 def restore_backup(backup_file):
-    # Extract the backup
     with zipfile.ZipFile(backup_file, 'r') as zipf:
         zipf.extractall(DATA_DIR)
     return True
@@ -421,6 +334,9 @@ def restore_backup(backup_file):
 # Utility functions
 def generate_barcode():
     return str(uuid.uuid4().int)[:12]
+
+def generate_short_id():
+    return str(uuid.uuid4())[:8]
 
 def format_currency(amount):
     settings = load_data(SETTINGS_FILE)
@@ -448,15 +364,22 @@ if 'last_activity' not in st.session_state:
     st.session_state.last_activity = time.time()
 if 'barcode_scanner_setup' not in st.session_state:
     st.session_state.barcode_scanner_setup = False
-if 'scanning_active' not in st.session_state:
-    st.session_state.scanning_active = False
 if 'scanned_barcode' not in st.session_state:
     st.session_state.scanned_barcode = None
+if 'scanner_status' not in st.session_state:
+    st.session_state.scanner_status = "Not Connected"
+if 'pos_mode' not in st.session_state:
+    st.session_state.pos_mode = 'scan'
+if 'selected_category' not in st.session_state:
+    st.session_state.selected_category = None
+if 'selected_subcategory' not in st.session_state:
+    st.session_state.selected_subcategory = None
+if 'return_reason' not in st.session_state:
+    st.session_state.return_reason = ""
 
 # Setup barcode scanner if not already done
 if not st.session_state.barcode_scanner_setup:
     setup_barcode_scanner()
-    st.session_state.barcode_scanner_setup = True
 
 # Login Page
 def login_page():
@@ -483,7 +406,7 @@ def login_page():
 # Shift Management
 def start_shift():
     shifts = load_data(SHIFTS_FILE)
-    shift_id = str(uuid.uuid4())
+    shift_id = generate_short_id()
     current_time = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
     
     shifts[shift_id] = {
@@ -514,7 +437,6 @@ def end_shift():
         shifts[shift_id]['end_time'] = current_time
         shifts[shift_id]['status'] = 'completed'
         
-        # Calculate total cash from transactions
         transactions = load_data(TRANSACTIONS_FILE)
         shift_transactions = [t for t in transactions.values() 
                             if t.get('shift_id') == shift_id and t['payment_method'] == 'Cash']
@@ -530,7 +452,6 @@ def end_shift():
 
 # Dashboard
 def dashboard():
-    # Check session timeout
     settings = load_data(SETTINGS_FILE)
     if settings.get('auto_logout', True):
         inactive_time = time.time() - st.session_state.last_activity
@@ -572,6 +493,7 @@ def dashboard():
         "Suppliers": suppliers_management,
         "Reports & Analytics": reports_analytics,
         "Shifts Management": shifts_management,
+        "Returns & Refunds": returns_management,
         "System Settings": system_settings,
         "Backup & Restore": backup_restore
     }
@@ -585,7 +507,8 @@ def dashboard():
         pages = {
             "Dashboard": dashboard_content,
             "POS Terminal": pos_terminal,
-            "Shifts Management": shifts_management
+            "Shifts Management": shifts_management,
+            "Returns & Refunds": returns_management
         }
     
     selected_page = st.sidebar.radio("Go to", list(pages.keys()))
@@ -606,34 +529,55 @@ def dashboard_content():
     
     col1, col2, col3 = st.columns(3)
     
-    # Load data for metrics
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
     transactions = load_data(TRANSACTIONS_FILE)
     
-    # Calculate metrics
     total_products = len(products)
     low_stock_items = sum(1 for item in inventory.values() if item.get('quantity', 0) < item.get('reorder_point', 10))
-    today_sales = sum(t['total'] for t in transactions.values() 
-                     if datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date() == datetime.date.today())
+    
+    today_sales = 0
+    today = datetime.date.today()
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if trans_date == today:
+                today_sales += t.get('total', 0)
+        except (ValueError, KeyError):
+            continue
     
     col1.metric("Total Products", total_products)
     col2.metric("Low Stock Items", low_stock_items)
     col3.metric("Today's Sales", format_currency(today_sales))
     
-    # Recent transactions
     st.subheader("Recent Transactions")
+    
+    def get_transaction_date(t):
+        try:
+            return datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, KeyError):
+            return datetime.datetime.min
+    
     recent_transactions = sorted(transactions.values(), 
-                               key=lambda x: datetime.datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"), 
+                               key=get_transaction_date, 
                                reverse=True)[:5]
     
     if recent_transactions:
-        trans_df = pd.DataFrame(recent_transactions)
-        st.dataframe(trans_df[['transaction_id', 'date', 'total', 'cashier']])
+        display_data = []
+        for t in recent_transactions:
+            display_data.append({
+                'transaction_id': t.get('transaction_id', 'N/A'),
+                'date': t.get('date', 'N/A'),
+                'total': format_currency(t.get('total', 0)),
+                'cashier': t.get('cashier', 'N/A')
+            })
+        
+        trans_df = pd.DataFrame(display_data)
+        st.dataframe(trans_df)
     else:
         st.info("No recent transactions")
 
-# POS Terminal
+# POS Terminal - Main Page
 def pos_terminal():
     if is_cashier() and not st.session_state.shift_started:
         st.warning("Please start your shift before using the POS terminal")
@@ -641,52 +585,45 @@ def pos_terminal():
     
     st.title("POS Terminal")
     
-    # Product search and selection
-    st.header("Product Selection")
+    # Scanner status indicator
+    if 'scanner_status' in st.session_state:
+        status_color = "green" if st.session_state.scanner_status == "Connected" else "red"
+        st.markdown(f"**Scanner Status:** <span style='color:{status_color}'>{st.session_state.scanner_status}</span>", 
+                   unsafe_allow_html=True)
+    
+    # POS Mode Selection
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Barcode Scan Mode", use_container_width=True):
+            st.session_state.pos_mode = 'scan'
+            st.rerun()
+    with col2:
+        if st.button("Manual Entry Mode", use_container_width=True):
+            st.session_state.pos_mode = 'manual'
+            st.rerun()
+    
+    if st.session_state.pos_mode == 'scan':
+        pos_scan_mode()
+    else:
+        pos_manual_mode()
+
+# POS Terminal - Scan Mode
+def pos_scan_mode():
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
     settings = load_data(SETTINGS_FILE)
     
+    st.header("Barcode Scan Mode")
+    
+    # Barcode scanning section
     col1, col2 = st.columns(2)
     with col1:
-        search_term = st.text_input("Search Products (name or barcode)")
+        search_term = st.text_input("Search Products (name or barcode)", key="scan_search")
     with col2:
-        if settings.get('barcode_scanner', 'camera') == 'camera':
-            if st.button("Scan Barcode"):
-                st.session_state.scanning_active = True
-                st.rerun()
+        st.info("Use connected barcode scanner to scan products")
     
-    # Handle barcode scanning
-    if st.session_state.scanning_active:
-        st.warning("Scanning in progress - align barcode with camera")
-        if barcode_scanner.init_camera_scanner():
-            barcode = barcode_scanner.start_camera_scanning()
-            if barcode:
-                st.session_state.scanned_barcode = barcode
-                st.session_state.scanning_active = False
-                st.rerun()
-    
-    # Check for scanned barcode
-    if st.session_state.scanned_barcode:
-        barcode = st.session_state.scanned_barcode
-        st.session_state.scanned_barcode = None
-        
-        if barcode in products:
-            product = products[barcode]
-            if barcode in st.session_state.cart:
-                st.session_state.cart[barcode]['quantity'] += 1
-            else:
-                st.session_state.cart[barcode] = {
-                    'name': product['name'],
-                    'price': product['price'],
-                    'quantity': 1
-                }
-            st.success(f"Added {product['name']} to cart")
-        else:
-            st.error("Product not found with this barcode")
-    
-    # Check for serial barcode scanner input
-    if settings.get('barcode_scanner', 'camera') == 'serial':
+    # Check for barcode scanner input
+    if st.session_state.scanner_status == "Connected":
         barcode = barcode_scanner.get_barcode()
         if barcode:
             if barcode in products:
@@ -697,12 +634,15 @@ def pos_terminal():
                     st.session_state.cart[barcode] = {
                         'name': product['name'],
                         'price': product['price'],
-                        'quantity': 1
+                        'quantity': 1,
+                        'description': product.get('description', '')
                     }
                 st.success(f"Added {product['name']} to cart")
+                st.rerun()
             else:
                 st.error("Product not found with this barcode")
     
+    # Product search results
     if search_term:
         filtered_products = {k: v for k, v in products.items() 
                            if search_term.lower() in v['name'].lower() or 
@@ -711,6 +651,7 @@ def pos_terminal():
         filtered_products = products
     
     # Display products in a grid layout
+    st.subheader("Products")
     cols_per_row = 4
     product_list = list(filtered_products.items())
     
@@ -720,9 +661,7 @@ def pos_terminal():
             if i + col_idx < len(product_list):
                 barcode, product = product_list[i + col_idx]
                 with cols[col_idx]:
-                    # Product card
                     with st.container():
-                        # Display product image if available
                         if 'image' in product and os.path.exists(product['image']):
                             try:
                                 img = Image.open(product['image'])
@@ -739,34 +678,162 @@ def pos_terminal():
                         color = "green" if stock > 0 else "red"
                         st.markdown(f"Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
                         
-                        if st.button(f"Add to Cart", key=f"add_{barcode}"):
+                        if st.button(f"Add to Cart", key=f"add_{barcode}", use_container_width=True):
                             if barcode in st.session_state.cart:
                                 st.session_state.cart[barcode]['quantity'] += 1
                             else:
                                 st.session_state.cart[barcode] = {
                                     'name': product['name'],
                                     'price': product['price'],
-                                    'quantity': 1
+                                    'quantity': 1,
+                                    'description': product.get('description', '')
                                 }
                             st.success(f"Added {product['name']} to cart")
+                            st.rerun()
     
-    # Cart display
+    # Display cart and checkout
+    display_cart_and_checkout()
+
+# POS Terminal - Manual Mode
+def pos_manual_mode():
+    products = load_data(PRODUCTS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    categories = load_data(CATEGORIES_FILE)
+    
+    st.header("Manual Entry Mode")
+    
+    # Category and subcategory selection
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_category = st.selectbox(
+            "Select Category", 
+            [""] + categories.get('categories', []),
+            key="manual_category"
+        )
+    with col2:
+        if selected_category:
+            subcategories = categories.get('subcategories', {}).get(selected_category, [])
+            selected_subcategory = st.selectbox(
+                "Select Subcategory", 
+                [""] + subcategories,
+                key="manual_subcategory"
+            )
+        else:
+            selected_subcategory = None
+    
+    # Display products based on category/subcategory selection
+    st.subheader("Products")
+    
+    if selected_category:
+        filtered_products = {}
+        for barcode, product in products.items():
+            if product.get('category') == selected_category:
+                if not selected_subcategory or product.get('subcategory') == selected_subcategory:
+                    filtered_products[barcode] = product
+        
+        if not filtered_products:
+            st.info("No products found in this category")
+        else:
+            cols_per_row = 4
+            product_list = list(filtered_products.items())
+            
+            for i in range(0, len(product_list), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for col_idx in range(cols_per_row):
+                    if i + col_idx < len(product_list):
+                        barcode, product = product_list[i + col_idx]
+                        with cols[col_idx]:
+                            with st.container():
+                                if 'image' in product and os.path.exists(product['image']):
+                                    try:
+                                        img = Image.open(product['image'])
+                                        img.thumbnail((150, 150))
+                                        st.image(img, use_column_width=True)
+                                    except:
+                                        pass
+                                
+                                st.subheader(product['name'])
+                                st.text(f"Price: {format_currency(product['price'])}")
+                                
+                                if product.get('description'):
+                                    with st.expander("Description"):
+                                        st.write(product['description'])
+                                
+                                stock = inventory.get(barcode, {}).get('quantity', 0)
+                                status = "In Stock" if stock > 0 else "Out of Stock"
+                                color = "green" if stock > 0 else "red"
+                                st.markdown(f"Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+                                
+                                quantity = st.number_input(
+                                    "Quantity", 
+                                    min_value=1, 
+                                    max_value=100, 
+                                    value=1, 
+                                    key=f"qty_{barcode}"
+                                )
+                                
+                                if st.button(f"Add to Cart", key=f"add_manual_{barcode}", use_container_width=True):
+                                    if barcode in st.session_state.cart:
+                                        st.session_state.cart[barcode]['quantity'] += quantity
+                                    else:
+                                        st.session_state.cart[barcode] = {
+                                            'name': product['name'],
+                                            'price': product['price'],
+                                            'quantity': quantity,
+                                            'description': product.get('description', '')
+                                        }
+                                    st.success(f"Added {quantity} {product['name']} to cart")
+                                    st.rerun()
+    else:
+        st.info("Please select a category to view products")
+    
+    display_cart_and_checkout()
+
+# Common cart and checkout display
+def display_cart_and_checkout():
+    settings = load_data(SETTINGS_FILE)
+    
     st.header("Current Sale")
     if st.session_state.cart:
-        cart_df = pd.DataFrame.from_dict(st.session_state.cart, orient='index')
-        cart_df['Total'] = cart_df['price'] * cart_df['quantity']
-        st.dataframe(cart_df)
+        for barcode, item in st.session_state.cart.items():
+            with st.container():
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
+                with col1:
+                    st.write(f"**{item['name']}**")
+                    if item.get('description'):
+                        with st.expander("Description"):
+                            st.write(item['description'])
+                with col2:
+                    new_qty = st.number_input(
+                        "Qty", 
+                        min_value=1, 
+                        max_value=100, 
+                        value=item['quantity'], 
+                        key=f"edit_{barcode}"
+                    )
+                    if new_qty != item['quantity']:
+                        st.session_state.cart[barcode]['quantity'] = new_qty
+                        st.rerun()
+                with col3:
+                    st.write(f"{format_currency(item['price'] * item['quantity'])}")
+                with col4:
+                    if st.button("❌", key=f"remove_{barcode}"):
+                        del st.session_state.cart[barcode]
+                        st.rerun()
         
-        subtotal = cart_df['Total'].sum()
+        subtotal = sum(item['price'] * item['quantity'] for item in st.session_state.cart.values())
         tax_rate = settings.get('tax_rate', 0.0)
         tax_amount = subtotal * tax_rate
         total = subtotal + tax_amount
         
-        st.text(f"Subtotal: {format_currency(subtotal)}")
-        st.text(f"Tax ({tax_rate*100}%): {format_currency(tax_amount)}")
-        st.text(f"Total: {format_currency(total)}")
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Summary")
+            st.write(f"Subtotal: {format_currency(subtotal)}")
+            st.write(f"Tax ({tax_rate*100}%): {format_currency(tax_amount)}")
+            st.write(f"Total: {format_currency(total)}")
         
-        # Apply discounts
         discounts = load_data(DISCOUNTS_FILE)
         active_discounts = [d for d in discounts.values() if d['active']]
         
@@ -782,16 +849,14 @@ def pos_terminal():
                     discount_amount = discount['value']
                 
                 total -= discount_amount
-                st.text(f"Discount Applied: -{format_currency(discount_amount)}")
-                st.text(f"New Total: {format_currency(total)}")
+                st.write(f"Discount Applied: -{format_currency(discount_amount)}")
+                st.write(f"New Total: {format_currency(total)}")
         
-        # Apply offers
         offers = load_data(OFFERS_FILE)
         active_offers = [o for o in offers.values() if o['active']]
         
         for offer in active_offers:
             if offer['type'] == 'bogo':
-                # Check if offer applies to any items in cart
                 for barcode, item in st.session_state.cart.items():
                     if barcode in offer.get('products', []):
                         if item['quantity'] >= offer['buy_quantity']:
@@ -800,96 +865,71 @@ def pos_terminal():
                             st.info(f"You get {free_qty} {item['name']} free")
                             total -= free_qty * item['price']
         
-        # Payment
-        st.header("Payment")
-        payment_method = st.selectbox("Payment Method", ["Cash", "Credit Card", "Debit Card", "Mobile Payment"])
-        amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total, step=1.0)
-        
-        if st.button("Complete Sale"):
-            if amount_tendered < total:
-                st.error("Amount tendered is less than total")
-            else:
-                # Record transaction
-                transactions = load_data(TRANSACTIONS_FILE)
-                transaction_id = str(uuid.uuid4())
-                
-                transactions[transaction_id] = {
-                    'transaction_id': transaction_id,
-                    'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                    'items': st.session_state.cart,
-                    'subtotal': subtotal,
-                    'tax': tax_amount,
-                    'discount': total - (subtotal + tax_amount),
-                    'total': total,
-                    'payment_method': payment_method,
-                    'amount_tendered': amount_tendered,
-                    'change': amount_tendered - total,
-                    'cashier': st.session_state.user_info['username'],
-                    'shift_id': st.session_state.shift_id if is_cashier() else None
-                }
-                
-                # Update inventory
-                inventory = load_data(INVENTORY_FILE)
-                for barcode, item in st.session_state.cart.items():
-                    if barcode in inventory:
-                        inventory[barcode]['quantity'] -= item['quantity']
-                    else:
-                        inventory[barcode] = {'quantity': -item['quantity']}
-                
-                # Save data
-                save_data(transactions, TRANSACTIONS_FILE)
-                save_data(inventory, INVENTORY_FILE)
-                
-                # Generate receipt
-                receipt = generate_receipt(transactions[transaction_id])
-                
-                # Show receipt
-                st.subheader("Receipt")
-                st.text(receipt)
-                
-                # Print receipt
-                if st.button("Print Receipt"):
+        with col2:
+            st.subheader("Payment")
+            payment_method = st.selectbox("Payment Method", ["Cash", "Credit Card", "Debit Card", "Mobile Payment"])
+            amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total, step=1.0)
+            
+            if st.button("Complete Sale", use_container_width=True):
+                if amount_tendered < total:
+                    st.error("Amount tendered is less than total")
+                else:
+                    transactions = load_data(TRANSACTIONS_FILE)
+                    transaction_id = generate_short_id()
+                    
+                    transactions[transaction_id] = {
+                        'transaction_id': transaction_id,
+                        'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                        'items': st.session_state.cart,
+                        'subtotal': subtotal,
+                        'tax': tax_amount,
+                        'discount': total - (subtotal + tax_amount),
+                        'total': total,
+                        'payment_method': payment_method,
+                        'amount_tendered': amount_tendered,
+                        'change': amount_tendered - total,
+                        'cashier': st.session_state.user_info['username'],
+                        'shift_id': st.session_state.shift_id if is_cashier() else None
+                    }
+                    
+                    inventory = load_data(INVENTORY_FILE)
+                    for barcode, item in st.session_state.cart.items():
+                        if barcode in inventory:
+                            inventory[barcode]['quantity'] -= item['quantity']
+                        else:
+                            inventory[barcode] = {'quantity': -item['quantity']}
+                    
+                    save_data(transactions, TRANSACTIONS_FILE)
+                    save_data(inventory, INVENTORY_FILE)
+                    
+                    receipt = generate_receipt(transactions[transaction_id])
+                    st.subheader("Receipt")
+                    st.text(receipt)
+                    
                     if print_receipt(receipt):
                         st.success("Receipt printed successfully")
                     else:
-                        st.error("Failed to print receipt")
-                
-                # Open cash drawer if payment is cash
-                if payment_method == "Cash" and settings.get('cash_drawer_enabled', False):
-                    if open_cash_drawer():
-                        st.success("Cash drawer opened")
-                    else:
-                        st.error("Failed to open cash drawer")
-                
-                st.session_state.cart = {}
+                        st.warning("Receipt could not be printed automatically")
+                    
+                    if payment_method == "Cash" and settings.get('cash_drawer_enabled', False):
+                        open_cash_drawer()
+                    
+                    st.session_state.cart = {}
+                    st.success("Sale completed successfully!")
+                    
     else:
         st.info("Cart is empty")
 
 def generate_receipt(transaction):
     settings = load_data(SETTINGS_FILE)
-    receipt_template = settings.get('receipt_template', 'Simple')
-    
     receipt = ""
     
     # Header
-    if settings.get('receipt_print_logo', False) and settings.get('store_logo', ''):
-        try:
-            img = Image.open(settings['store_logo'])
-            img.thumbnail((200, 200))
-            buffered = io.BytesIO()
-            img.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-            receipt += f"<img src='data:image/png;base64,{img_str}'><br>"
-        except:
-            pass
-    
     receipt += f"{settings.get('store_name', 'Supermarket POS')}\n"
     receipt += f"{settings.get('store_address', '')}\n"
     receipt += f"{settings.get('store_phone', '')}\n"
-    receipt += f"{settings.get('store_email', '')}\n"
     receipt += "=" * 40 + "\n"
     
-    # Custom header
     if settings.get('receipt_header', ''):
         receipt += f"{settings['receipt_header']}\n"
         receipt += "=" * 40 + "\n"
@@ -914,7 +954,6 @@ def generate_receipt(transaction):
     receipt += f"Change: {format_currency(transaction['change'])}\n"
     receipt += "=" * 40 + "\n"
     
-    # Custom footer
     if settings.get('receipt_footer', ''):
         receipt += f"{settings['receipt_footer']}\n"
         receipt += "=" * 40 + "\n"
@@ -923,6 +962,249 @@ def generate_receipt(transaction):
     
     return receipt
 
+# Returns & Refunds Management
+def returns_management():
+    st.title("Returns & Refunds")
+    
+    tab1, tab2, tab3 = st.tabs(["Process Return", "View Returns", "Refund History"])
+    
+    with tab1:
+        st.header("Process Return")
+        
+        transactions = load_data(TRANSACTIONS_FILE)
+        products = load_data(PRODUCTS_FILE)
+        
+        transaction_id = st.text_input("Enter Transaction ID")
+        
+        if transaction_id:
+            if transaction_id in transactions:
+                transaction = transactions[transaction_id]
+                
+                st.subheader("Transaction Details")
+                st.write(f"Date: {transaction['date']}")
+                st.write(f"Total: {format_currency(transaction['total'])}")
+                st.write(f"Payment Method: {transaction['payment_method']}")
+                
+                st.subheader("Items Purchased")
+                for barcode, item in transaction['items'].items():
+                    with st.container():
+                        col1, col2, col3 = st.columns([4, 2, 2])
+                        with col1:
+                            st.write(f"**{item['name']}**")
+                        with col2:
+                            st.write(f"Qty: {item['quantity']}")
+                        with col3:
+                            return_qty = st.number_input(
+                                "Return Qty", 
+                                min_value=0, 
+                                max_value=item['quantity'], 
+                                value=0, 
+                                key=f"return_{barcode}"
+                            )
+                
+                return_reason = st.selectbox(
+                    "Reason for Return",
+                    ["", "Defective", "Wrong Item", "Customer Changed Mind", "Other"]
+                )
+                
+                if return_reason == "Other":
+                    return_reason = st.text_input("Please specify reason")
+                
+                if st.button("Process Return"):
+                    returned_items = {}
+                    total_refund = 0
+                    
+                    for barcode, item in transaction['items'].items():
+                        return_qty = st.session_state.get(f"return_{barcode}", 0)
+                        if return_qty > 0:
+                            returned_items[barcode] = {
+                                'name': item['name'],
+                                'quantity': return_qty,
+                                'price': item['price'],
+                                'subtotal': return_qty * item['price']
+                            }
+                            total_refund += return_qty * item['price']
+                    
+                    if not returned_items:
+                        st.error("No items selected for return")
+                    else:
+                        original_tax_rate = transaction['tax'] / transaction['subtotal']
+                        tax_refund = total_refund * original_tax_rate
+                        total_refund += tax_refund
+                        
+                        returns = load_data(RETURNS_FILE)
+                        return_id = generate_short_id()
+                        
+                        returns[return_id] = {
+                            'return_id': return_id,
+                            'transaction_id': transaction_id,
+                            'original_date': transaction['date'],
+                            'return_date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                            'items': returned_items,
+                            'total_refund': total_refund,
+                            'tax_refund': tax_refund,
+                            'reason': return_reason,
+                            'processed_by': st.session_state.user_info['username'],
+                            'shift_id': st.session_state.shift_id if is_cashier() else None
+                        }
+                        
+                        inventory = load_data(INVENTORY_FILE)
+                        for barcode, item in returned_items.items():
+                            if barcode in inventory:
+                                inventory[barcode]['quantity'] += item['quantity']
+                            else:
+                                inventory[barcode] = {'quantity': item['quantity']}
+                        
+                        refund_method = transaction['payment_method']
+                        
+                        if refund_method == "Cash":
+                            returns[return_id]['refund_method'] = "Cash"
+                            returns[return_id]['status'] = "Completed"
+                            
+                            if is_cashier() and st.session_state.shift_started:
+                                cash_drawer = load_data(CASH_DRAWER_FILE)
+                                cash_drawer['current_balance'] -= total_refund
+                                cash_drawer['transactions'].append({
+                                    'type': 'refund',
+                                    'amount': -total_refund,
+                                    'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                                    'return_id': return_id,
+                                    'processed_by': st.session_state.user_info['username']
+                                })
+                                save_data(cash_drawer, CASH_DRAWER_FILE)
+                            
+                            st.success(f"Cash refund processed: {format_currency(total_refund)}")
+                        else:
+                            returns[return_id]['refund_method'] = refund_method
+                            returns[return_id]['status'] = "Pending"
+                            st.success(f"Refund request for {format_currency(total_refund)} to original payment method has been submitted")
+                        
+                        save_data(returns, RETURNS_FILE)
+                        save_data(inventory, INVENTORY_FILE)
+                        
+                        return_receipt = generate_return_receipt(returns[return_id])
+                        st.subheader("Return Receipt")
+                        st.text(return_receipt)
+                        
+                        if st.button("Print Return Receipt"):
+                            if print_receipt(return_receipt):
+                                st.success("Return receipt printed successfully")
+                            else:
+                                st.error("Failed to print return receipt")
+            else:
+                st.error("Transaction not found")
+
+    with tab2:
+        st.header("View Returns")
+        
+        returns = load_data(RETURNS_FILE)
+        
+        if not returns:
+            st.info("No returns processed")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                status_filter = st.selectbox("Filter by Status", ["All", "Completed", "Pending"])
+            with col2:
+                user_filter = st.selectbox("Filter by User", ["All"] + list(set(r['processed_by'] for r in returns.values())))
+            
+            filtered_returns = returns.values()
+            if status_filter != "All":
+                filtered_returns = [r for r in filtered_returns if r['status'] == status_filter]
+            if user_filter != "All":
+                filtered_returns = [r for r in filtered_returns if r['processed_by'] == user_filter]
+            
+            if not filtered_returns:
+                st.info("No returns match the filters")
+            else:
+                for return_data in filtered_returns:
+                    with st.expander(f"Return #{return_data['return_id']} - {return_data['status']}"):
+                        st.write(f"Original Transaction: {return_data['transaction_id']}")
+                        st.write(f"Date: {return_data['return_date']}")
+                        st.write(f"Processed by: {return_data['processed_by']}")
+                        st.write(f"Reason: {return_data['reason']}")
+                        st.write(f"Total Refund: {format_currency(return_data['total_refund'])}")
+                        st.write(f"Refund Method: {return_data['refund_method']}")
+                        
+                        st.subheader("Returned Items")
+                        for barcode, item in return_data['items'].items():
+                            st.write(f"{item['name']} x{item['quantity']}: {format_currency(item['subtotal'])}")
+                        
+                        if return_data['status'] == "Pending" and is_manager():
+                            if st.button("Mark as Completed", key=f"complete_{return_data['return_id']}"):
+                                returns[return_data['return_id']]['status'] = "Completed"
+                                returns[return_data['return_id']]['completed_date'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                                save_data(returns, RETURNS_FILE)
+                                st.success("Return marked as completed")
+                                st.rerun()
+    
+    with tab3:
+        st.header("Refund History")
+        
+        returns = load_data(RETURNS_FILE)
+        
+        if not returns:
+            st.info("No refunds processed")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+            with col2:
+                end_date = st.date_input("End Date", value=datetime.date.today())
+            
+            filtered_returns = []
+            for return_data in returns.values():
+                return_date = datetime.datetime.strptime(return_data['return_date'], "%Y-%m-%d %H:%M:%S").date()
+                if start_date <= return_date <= end_date:
+                    filtered_returns.append(return_data)
+            
+            if not filtered_returns:
+                st.info("No refunds in selected date range")
+            else:
+                refund_summary = {
+                    'Total Refunds': len(filtered_returns),
+                    'Total Amount Refunded': sum(r['total_refund'] for r in filtered_returns),
+                    'Cash Refunds': sum(1 for r in filtered_returns if r['refund_method'] == "Cash"),
+                    'Card Refunds': sum(1 for r in filtered_returns if r['refund_method'] in ["Credit Card", "Debit Card"]),
+                    'Pending Refunds': sum(1 for r in filtered_returns if r['status'] == "Pending")
+                }
+                
+                st.subheader("Refund Summary")
+                st.write(refund_summary)
+                
+                st.subheader("Refund Details")
+                refund_df = pd.DataFrame(filtered_returns)
+                st.dataframe(refund_df[['return_id', 'return_date', 'total_refund', 'refund_method', 'status']])
+
+def generate_return_receipt(return_data):
+    settings = load_data(SETTINGS_FILE)
+    receipt = ""
+    
+    receipt += f"{settings.get('store_name', 'Supermarket POS')}\n"
+    receipt += "RETURN RECEIPT\n"
+    receipt += "=" * 40 + "\n"
+    
+    receipt += f"Return ID: {return_data['return_id']}\n"
+    receipt += f"Original Transaction: {return_data['transaction_id']}\n"
+    receipt += f"Date: {return_data['return_date']}\n"
+    receipt += f"Processed by: {return_data['processed_by']}\n"
+    receipt += f"Reason: {return_data['reason']}\n"
+    receipt += "=" * 40 + "\n"
+    
+    receipt += "RETURNED ITEMS:\n"
+    for barcode, item in return_data['items'].items():
+        receipt += f"{item['name']} x{item['quantity']}: {format_currency(item['subtotal'])}\n"
+    
+    receipt += "=" * 40 + "\n"
+    receipt += f"Subtotal Refund: {format_currency(return_data['total_refund'] - return_data['tax_refund'])}\n"
+    receipt += f"Tax Refund: {format_currency(return_data['tax_refund'])}\n"
+    receipt += f"Total Refund: {format_currency(return_data['total_refund'])}\n"
+    receipt += f"Refund Method: {return_data['refund_method']}\n"
+    receipt += f"Status: {return_data['status']}\n"
+    receipt += "=" * 40 + "\n"
+    receipt += "Thank you for your business!\n"
+    
+    return receipt
 # Product Management
 def product_management():
     if not is_manager():
@@ -1315,7 +1597,7 @@ def inventory_management():
         if not inventory:
             st.info("No inventory data available")
         else:
-            report_type = st.selectbox("Report Type", [
+            report_type = st.selectbox("Inventory Report Type", [
                 "Stock Value Report",
                 "Low Stock Report",
                 "Stock Movement Report",
@@ -1560,7 +1842,7 @@ def user_management():
                             users[username]['email'] = email
                             users[username]['role'] = role
                             users[username]['active'] = active
-                            users[username]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                            users[username]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
                             users[username]['updated_by'] = st.session_state.user_info['username']
                             
                             if password:
@@ -2257,7 +2539,7 @@ def offers_management():
                     st.success(f"Import completed: {imported} new offers, {errors} errors")
             except Exception as e:
                 st.error(f"Error reading CSV file: {str(e)}")
-
+                
 # Loyalty Program Management
 def loyalty_management():
     if not is_manager():
@@ -3336,81 +3618,81 @@ def system_settings():
                 save_data(settings, SETTINGS_FILE)
                 st.success("Tax settings saved successfully")
     
+   # In the System Settings section (tab4), replace the printer settings with:
+
     with tab4:
-        st.header("Printer Settings")
-        
-        settings = load_data(SETTINGS_FILE)
-        printers = get_available_printers()
-        
-        with st.form("printer_settings_form"):
-            # Handle case where saved printer isn't in available printers
-            default_printer_index = 0
-            if printers:
-                saved_printer = settings.get('printer_name', '')
-                if saved_printer in printers:
-                    default_printer_index = printers.index(saved_printer)
-                
-            printer_name = st.selectbox(
-                "Select Printer",
-                printers,
-                index=default_printer_index
-            )
-            
-            test_print = st.text_area("Test Receipt Text", value="POS System Test Receipt\n====================\nTest Line 1\nTest Line 2\n====================")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.form_submit_button("Save Printer Settings"):
-                    settings['printer_name'] = printer_name
-                    save_data(settings, SETTINGS_FILE)
-                    st.success("Printer settings saved successfully")
-            with col2:
-                if st.form_submit_button("Test Print"):
-                    if print_receipt(test_print):
-                        st.success("Test receipt printed successfully")
-                    else:
-                        st.error("Failed to print test receipt")
+       st.header("Printer Settings")
     
-    with tab5:
-        st.header("Hardware Settings")
+       settings = load_data(SETTINGS_FILE)
+    
+       with st.form("printer_settings_form"):
+         printer_name = st.text_input(
+            "Printer Name (for reference only)",
+            value=settings.get('printer_name', 'Browser Printer')
+         )
         
-        settings = load_data(SETTINGS_FILE)
-        com_ports = get_available_com_ports()
+         test_print = st.text_area("Test Receipt Text", 
+                                value="POS System Test Receipt\n====================\nTest Line 1\nTest Line 2\n====================")
         
-        with st.form("hardware_settings_form"):
-            barcode_scanner = st.selectbox(
-                "Barcode Scanner Type",
-                ["Camera", "Serial Scanner"],
-                index=0 if settings.get('barcode_scanner', 'camera') == 'camera' else 1
-            )
-            
-            barcode_scanner_port = st.selectbox(
-                "Barcode Scanner Port",
-                com_ports,
-                index=com_ports.index(settings.get('barcode_scanner_port', 'auto'))
-            )
-            
-            cash_drawer_enabled = st.checkbox(
-                "Enable Cash Drawer",
-                value=settings.get('cash_drawer_enabled', False)
-            )
-            
-            cash_drawer_command = st.text_input(
-                "Cash Drawer Command",
-                value=settings.get('cash_drawer_command', '')
-            )
-            
-            if st.form_submit_button("Save Hardware Settings"):
-                settings['barcode_scanner'] = barcode_scanner.lower()
-                settings['barcode_scanner_port'] = barcode_scanner_port
-                settings['cash_drawer_enabled'] = cash_drawer_enabled
-                settings['cash_drawer_command'] = cash_drawer_command
+         col1, col2 = st.columns(2)
+         with col1:
+            if st.form_submit_button("Save Printer Settings"):
+                settings['printer_name'] = printer_name
                 save_data(settings, SETTINGS_FILE)
-                st.success("Hardware settings saved successfully")
-                
-                # Reinitialize barcode scanner with new settings
+                st.success("Printer settings saved successfully")
+         with col2:
+            if st.form_submit_button("Test Print"):
+                if print_receipt(test_print):
+                    st.success("Test receipt printed successfully")
+                else:
+                    st.error("Failed to print test receipt")
+    
+   # In the system_settings function, replace the hardware settings section with:
+
+    with tab5:
+     st.header("Hardware Settings")
+    
+     settings = load_data(SETTINGS_FILE)
+     com_ports = get_available_com_ports()
+    
+     with st.form("hardware_settings_form"):
+        barcode_scanner_type = st.selectbox(
+            "Barcode Scanner Type",
+            ["Keyboard", "Serial Scanner"],
+            index=0 if settings.get('barcode_scanner', 'keyboard') == 'keyboard' else 1
+        )
+        
+        barcode_scanner_port = st.selectbox(
+            "Barcode Scanner Port (for serial scanners)",
+            com_ports,
+            index=com_ports.index(settings.get('barcode_scanner_port', 'auto'))
+        )
+        
+        cash_drawer_enabled = st.checkbox(
+            "Enable Cash Drawer",
+            value=settings.get('cash_drawer_enabled', False)
+        )
+        
+        cash_drawer_command = st.text_input(
+            "Cash Drawer Command",
+            value=settings.get('cash_drawer_command', '')
+        )
+        
+        if st.form_submit_button("Save Hardware Settings"):
+            # Stop any existing scanner
+            if 'barcode_scanner' in globals() and hasattr(barcode_scanner, 'stop_scanning'):
                 barcode_scanner.stop_scanning()
-                setup_barcode_scanner()
+            
+            # Update settings
+            settings['barcode_scanner'] = barcode_scanner_type.lower().replace(' ', '_')
+            settings['barcode_scanner_port'] = barcode_scanner_port
+            settings['cash_drawer_enabled'] = cash_drawer_enabled
+            settings['cash_drawer_command'] = cash_drawer_command
+            save_data(settings, SETTINGS_FILE)
+            
+            # Reinitialize scanner with new settings
+            setup_barcode_scanner()
+            st.success("Hardware settings saved successfully")
 
 # Backup & Restore
 def backup_restore():
@@ -3501,4 +3783,4 @@ def main():
         dashboard()
 
 if __name__ == "__main__":
-    main()
+    main()                                                      
