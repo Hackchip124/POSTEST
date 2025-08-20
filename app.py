@@ -38,6 +38,7 @@ SUPPLIERS_FILE = os.path.join(DATA_DIR, "suppliers.json")
 SHIFTS_FILE = os.path.join(DATA_DIR, "shifts.json")
 CASH_DRAWER_FILE = os.path.join(DATA_DIR, "cash_drawer.json")
 RETURNS_FILE = os.path.join(DATA_DIR, "returns.json")
+PURCHASE_ORDERS_FILE = os.path.join(DATA_DIR, "purchase_orders.json")
 
 # Authentication functions
 def hash_password(password):
@@ -140,7 +141,8 @@ def initialize_empty_data():
             "current_balance": 0.0,
             "transactions": []
         },
-        RETURNS_FILE: {}
+        RETURNS_FILE: {},
+        PURCHASE_ORDERS_FILE: {}
     }
     
     for file, data in default_data.items():
@@ -188,6 +190,7 @@ def print_receipt(receipt_text):
             win.document.write(`<pre>{receipt_text}</pre>`);
             win.document.close();
             win.print();
+            setTimeout(() => win.close(), 500);
         }}
         printReceipt();
         </script>
@@ -199,14 +202,33 @@ def print_receipt(receipt_text):
     
     # 2. PDF fallback
     try:
-        pdf = FPDF()
+        pdf = FPDF.FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
-        pdf.multi_cell(0, 10, receipt_text)
+        
+        # Add store header if enabled
+        if settings.get('receipt_print_logo', False) and 'store_logo' in settings and os.path.exists(settings['store_logo']):
+            try:
+                pdf.image(settings['store_logo'], x=10, y=8, w=30)
+                pdf.ln(20)  # Move down after logo
+            except:
+                pass
+        
+        # Add receipt content
+        for line in receipt_text.split('\n'):
+            pdf.cell(0, 10, line, ln=1)
+        
         pdf_path = "receipt.pdf"
         pdf.output(pdf_path)
-        with open(pdf_path, "rb") as f:
-            st.download_button("Download Receipt (PDF)", f, "receipt.pdf")
+        
+        # Open PDF for printing
+        if platform.system() == "Windows":
+            os.startfile(pdf_path, "print")
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.run(["lp", pdf_path])
+        else:  # Linux
+            subprocess.run(["lp", pdf_path])
+        
         return True
     except Exception as e:
         st.error(f"Printing failed: {str(e)}")
@@ -349,6 +371,110 @@ def get_current_datetime():
     tz = pytz.timezone(settings.get('timezone', 'UTC'))
     return datetime.datetime.now(tz)
 
+# Purchase Order functions
+def generate_purchase_order(supplier_id, items):
+    suppliers = load_data(SUPPLIERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    
+    if supplier_id not in suppliers:
+        return None
+    
+    supplier = suppliers[supplier_id]
+    po_id = generate_short_id()
+    
+    # Calculate totals
+    total_cost = 0
+    for item in items:
+        product = products.get(item['barcode'], {})
+        total_cost += item['quantity'] * product.get('cost', 0)
+    
+    # Create PO
+    purchase_orders[po_id] = {
+        'po_id': po_id,
+        'supplier_id': supplier_id,
+        'supplier_name': supplier['name'],
+        'date_created': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'created_by': st.session_state.user_info['username'],
+        'items': items,
+        'total_cost': total_cost,
+        'status': 'pending',
+        'date_received': None,
+        'received_by': None
+    }
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    return po_id
+
+def generate_po_report(po_id):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    settings = load_data(SETTINGS_FILE)
+    
+    if po_id not in purchase_orders:
+        return None
+    
+    po = purchase_orders[po_id]
+    
+    report = f"PURCHASE ORDER #{po_id}\n"
+    report += f"{settings.get('store_name', 'Supermarket POS')}\n"
+    report += f"Date: {po['date_created']}\n"
+    report += "=" * 50 + "\n"
+    report += f"Supplier: {po['supplier_name']}\n"
+    report += f"Created by: {po['created_by']}\n"
+    report += "=" * 50 + "\n"
+    report += "ITEMS:\n"
+    report += "Barcode\tProduct\tQty\tUnit Cost\tTotal\n"
+    
+    for item in po['items']:
+        product = products.get(item['barcode'], {'name': 'Unknown', 'cost': 0})
+        report += f"{item['barcode']}\t{product['name']}\t{item['quantity']}\t"
+        report += f"{format_currency(product.get('cost', 0))}\t"
+        report += f"{format_currency(item['quantity'] * product.get('cost', 0))}\n"
+    
+    report += "=" * 50 + "\n"
+    report += f"TOTAL COST: {format_currency(po['total_cost'])}\n"
+    report += f"STATUS: {po['status'].upper()}\n"
+    
+    if po['status'] == 'received':
+        report += f"Received on: {po['date_received']} by {po['received_by']}\n"
+    
+    return report
+
+def process_received_po(po_id):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    
+    if po_id not in purchase_orders:
+        return False
+    
+    po = purchase_orders[po_id]
+    
+    if po['status'] == 'received':
+        return True  # Already processed
+    
+    # Update inventory
+    for item in po['items']:
+        barcode = item['barcode']
+        quantity = item['quantity']
+        
+        if barcode in inventory:
+            inventory[barcode]['quantity'] += quantity
+        else:
+            inventory[barcode] = {'quantity': quantity, 'reorder_point': 10}
+        
+        inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+        inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+    
+    # Update PO status
+    po['status'] = 'received'
+    po['date_received'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+    po['received_by'] = st.session_state.user_info['username']
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    save_data(inventory, INVENTORY_FILE)
+    return True
+
 # Session state initialization
 if 'user_info' not in st.session_state:
     st.session_state.user_info = None
@@ -376,6 +502,10 @@ if 'selected_subcategory' not in st.session_state:
     st.session_state.selected_subcategory = None
 if 'return_reason' not in st.session_state:
     st.session_state.return_reason = ""
+if 'po_supplier' not in st.session_state:
+    st.session_state.po_supplier = None
+if 'po_items' not in st.session_state:
+    st.session_state.po_items = []
 
 # Setup barcode scanner if not already done
 if not st.session_state.barcode_scanner_setup:
@@ -491,6 +621,7 @@ def dashboard():
         "Loyalty Program": loyalty_management,
         "Categories": categories_management,
         "Suppliers": suppliers_management,
+        "Purchase Orders": purchase_orders_management,
         "Reports & Analytics": reports_analytics,
         "Shifts Management": shifts_management,
         "Returns & Refunds": returns_management,
@@ -1205,6 +1336,610 @@ def generate_return_receipt(return_data):
     receipt += "Thank you for your business!\n"
     
     return receipt
+
+# Purchase Orders Management
+# Constants (at the top of your file)
+PURCHASE_ORDERS_FILE = os.path.join(DATA_DIR, "purchase_orders.json")
+
+def generate_purchase_order(supplier_id, items):
+    suppliers = load_data(SUPPLIERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    
+    if supplier_id not in suppliers:
+        return None
+    
+    supplier = suppliers[supplier_id]
+    po_id = generate_short_id()
+    
+    # Calculate totals
+    total_cost = 0
+    for item in items:
+        product = products.get(item['barcode'], {})
+        total_cost += item['quantity'] * product.get('cost', 0)
+    
+    # Create PO
+    purchase_orders[po_id] = {
+        'po_id': po_id,
+        'supplier_id': supplier_id,
+        'supplier_name': supplier['name'],
+        'date_created': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'created_by': st.session_state.user_info['username'],
+        'items': items,
+        'total_cost': total_cost,
+        'status': 'pending',  # pending, partially_received, received, cancelled
+        'receipts': [],  # Array to track multiple receipts
+        'date_received': None,
+        'received_by': None
+    }
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    return po_id
+
+def generate_po_report(po_id):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    settings = load_data(SETTINGS_FILE)
+    
+    if po_id not in purchase_orders:
+        return None
+    
+    po = purchase_orders[po_id]
+    
+    report = f"PURCHASE ORDER #{po_id}\n"
+    report += f"{settings.get('store_name', 'Supermarket POS')}\n"
+    report += f"Date: {po['date_created']}\n"
+    report += "=" * 50 + "\n"
+    report += f"Supplier: {po['supplier_name']}\n"
+    report += f"Created by: {po['created_by']}\n"
+    report += "=" * 50 + "\n"
+    report += "ITEMS:\n"
+    report += "Barcode\tProduct\tQty\tUnit Cost\tTotal\n"
+    
+    for item in po['items']:
+        product = products.get(item['barcode'], {'name': 'Unknown', 'cost': 0})
+        report += f"{item['barcode']}\t{product['name']}\t{item['quantity']}\t"
+        report += f"{format_currency(product.get('cost', 0))}\t"
+        report += f"{format_currency(item['quantity'] * product.get('cost', 0))}\n"
+    
+    report += "=" * 50 + "\n"
+    report += f"TOTAL COST: {format_currency(po['total_cost'])}\n"
+    report += f"STATUS: {po['status'].upper().replace('_', ' ')}\n"
+    
+    if po['receipts']:
+        report += "\nRECEIPT HISTORY:\n"
+        for receipt in po['receipts']:
+            report += f"- {receipt['date']} by {receipt['received_by']}\n"
+            for item in receipt['items']:
+                report += f"  {item['name']}: {item['received_quantity']}/{item['ordered_quantity']}\n"
+    
+    if po['status'] in ['received', 'partially_received']:
+        report += f"\nCompleted on: {po['date_received']} by {po['received_by']}\n"
+    
+    return report
+
+def process_received_po(po_id, received_items, notes, mark_as_complete=False):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    products = load_data(PRODUCTS_FILE)
+    
+    if po_id not in purchase_orders:
+        return False
+    
+    po = purchase_orders[po_id]
+    
+    if po['status'] == 'received':
+        return True  # Already fully processed
+    
+    # Update inventory only for received items
+    for item in received_items:
+        if item['received_quantity'] > 0:
+            barcode = item['barcode']
+            
+            if barcode in inventory:
+                inventory[barcode]['quantity'] += item['received_quantity']
+            else:
+                # Initialize inventory with default values if product doesn't exist in inventory
+                inventory[barcode] = {
+                    'quantity': item['received_quantity'],
+                    'reorder_point': 10,  # Default reorder point
+                    'cost': products.get(barcode, {}).get('cost', 0)  # Get cost from products if available
+                }
+            
+            inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+    
+    # Update PO status
+    if all(item['received_quantity'] == item['ordered_quantity'] for item in received_items):
+        po['status'] = 'received'
+    elif mark_as_complete:
+        po['status'] = 'partially_received'
+    else:
+        po['status'] = 'pending'  # Still waiting for more items
+    
+    # Add receipt details to PO
+    po['receipts'] = po.get('receipts', [])
+    po['receipts'].append({
+        'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'received_by': st.session_state.user_info['username'],
+        'items': received_items,
+        'notes': notes
+    })
+    
+    # Update the PO items if partially received and marked as complete
+    if mark_as_complete and po['status'] == 'partially_received':
+        # Adjust PO items to only include remaining quantities
+        po['items'] = [
+            {
+                'barcode': item['barcode'],
+                'name': item['name'],
+                'quantity': item['ordered_quantity'] - item['received_quantity'],
+                'cost': item['cost']
+            }
+            for item in received_items
+            if item['received_quantity'] < item['ordered_quantity']
+        ]
+    
+    # Update completion info if fully or partially completed
+    if po['status'] in ['received', 'partially_received']:
+        po['date_received'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+        po['received_by'] = st.session_state.user_info['username']
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    save_data(inventory, INVENTORY_FILE)
+    return True
+
+def purchase_orders_management():
+    if not is_manager():
+        st.warning("You don't have permission to access this page")
+        return
+    
+    st.title("Purchase Orders Management")
+    
+    tab1, tab2, tab3 = st.tabs(["Create PO", "View POs", "Receive PO"])
+    
+    with tab1:
+        st.header("Create Purchase Order")
+        
+        suppliers = load_data(SUPPLIERS_FILE)
+        products = load_data(PRODUCTS_FILE)
+        inventory = load_data(INVENTORY_FILE)
+        
+        if not suppliers:
+            st.warning("No suppliers available. Please add suppliers first.")
+            return
+        
+        if not products:
+            st.warning("No products available. Please add products first.")
+            return
+        
+        if 'po_items' not in st.session_state:
+            st.session_state.po_items = []
+        
+        # Display low stock items
+        low_stock_items = []
+        for barcode, inv_data in inventory.items():
+            if barcode in products and inv_data.get('quantity', 0) < inv_data.get('reorder_point', 10):
+                product = products[barcode]
+                low_stock_items.append({
+                    'barcode': barcode,
+                    'name': product['name'],
+                    'current_stock': inv_data.get('quantity', 0),
+                    'reorder_point': inv_data.get('reorder_point', 10),
+                    'cost': product.get('cost', 0),
+                    'quantity': max(inv_data.get('reorder_point', 10) - inv_data.get('quantity', 0), 1)
+                })
+        
+        if low_stock_items:
+            st.info("The following items are below reorder point:")
+            low_stock_df = pd.DataFrame(low_stock_items)
+            st.dataframe(low_stock_df[['name', 'current_stock', 'reorder_point', 'cost']])
+            
+            if st.button("Add All Low Stock Items to PO"):
+                for item in low_stock_items:
+                    if not any(i['barcode'] == item['barcode'] for i in st.session_state.po_items):
+                        st.session_state.po_items.append({
+                            'barcode': item['barcode'],
+                            'name': item['name'],
+                            'quantity': item['quantity'],
+                            'cost': item['cost']
+                        })
+                st.rerun()
+        
+        with st.form("po_form"):
+            supplier_options = {f"{v['name']} ({k})": k for k, v in suppliers.items()}
+            selected_supplier = st.selectbox("Select Supplier", [""] + list(supplier_options.keys()))
+            
+            product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+            selected_product = st.selectbox("Select Product", [""] + list(product_options.keys()))
+            quantity = st.number_input("Quantity", min_value=1, value=1, step=1)
+            
+            po_notes = st.text_area("Notes")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                add_item = st.form_submit_button("Add Item to PO")
+            with col2:
+                create_po = st.form_submit_button("Create Purchase Order")
+            
+            if add_item and selected_product:
+                barcode = product_options[selected_product]
+                if not any(i['barcode'] == barcode for i in st.session_state.po_items):
+                    st.session_state.po_items.append({
+                        'barcode': barcode,
+                        'name': products[barcode]['name'],
+                        'quantity': quantity,
+                        'cost': products[barcode].get('cost', 0)
+                    })
+                    st.rerun()
+                else:
+                    st.warning("Item already in PO. Adjust quantity in PO items below.")
+            
+            if create_po:
+                if not selected_supplier:
+                    st.error("Please select a supplier")
+                elif not st.session_state.po_items:
+                    st.error("Please add items to the purchase order")
+                else:
+                    supplier_id = supplier_options[selected_supplier]
+                    po_id = generate_purchase_order(supplier_id, st.session_state.po_items)
+                    
+                    if po_id:
+                        st.session_state.last_po_id = po_id
+                        po_report = generate_po_report(po_id)
+                        st.success("Purchase order created successfully!")
+                        st.subheader("Purchase Order")
+                        st.text(po_report)
+                        
+                        st.session_state.po_items = []
+                        
+                    else:
+                        st.error("Failed to create purchase order")
+        
+        st.subheader("Current PO Items")
+        if not st.session_state.po_items:
+            st.info("No items in PO")
+        else:
+            items_copy = st.session_state.po_items.copy()
+            items_to_remove = []
+            
+            for idx, item in enumerate(st.session_state.po_items):
+                with st.container():
+                    col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
+                    with col1:
+                        st.write(f"**{item['name']}**")
+                    with col2:
+                        new_qty = st.number_input(
+                            "Qty", 
+                            min_value=1, 
+                            value=item['quantity'], 
+                            key=f"po_qty_{idx}"
+                        )
+                        if new_qty != item['quantity']:
+                            items_copy[idx]['quantity'] = new_qty
+                    with col3:
+                        st.write(f"Cost: {format_currency(item['cost'])}")
+                        st.write(f"Total: {format_currency(item['cost'] * item['quantity'])}")
+                    with col4:
+                        if st.button("❌", key=f"remove_po_{idx}"):
+                            items_to_remove.append(idx)
+            
+            if items_copy != st.session_state.po_items:
+                st.session_state.po_items = items_copy
+                st.rerun()
+            
+            if items_to_remove:
+                for idx in sorted(items_to_remove, reverse=True):
+                    st.session_state.po_items.pop(idx)
+                st.rerun()
+        
+        if st.button("Print Last Purchase Order"):
+            if 'last_po_id' in st.session_state:
+                po_report = generate_po_report(st.session_state.last_po_id)
+                if print_receipt(po_report):
+                    st.success("Purchase order printed successfully")
+                else:
+                    st.error("Failed to print purchase order")
+            else:
+                st.warning("No purchase order created yet")
+
+    with tab2:
+        st.header("View Purchase Orders")
+        
+        purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+        suppliers = load_data(SUPPLIERS_FILE)
+        
+        if not purchase_orders:
+            st.info("No purchase orders available")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                status_filter = st.selectbox("Filter by Status", ["All", "pending", "partially_received", "received"])
+            with col2:
+                supplier_filter = st.selectbox("Filter by Supplier", ["All"] + list(set(po['supplier_name'] for po in purchase_orders.values())))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+            with col2:
+                end_date = st.date_input("End Date", value=datetime.date.today())
+            
+            filtered_pos = []
+            for po_id, po in purchase_orders.items():
+                try:
+                    po_date = datetime.datetime.strptime(po['date_created'], "%Y-%m-%d %H:%M:%S").date()
+                    if (status_filter == "All" or po['status'] == status_filter) and \
+                       (supplier_filter == "All" or po['supplier_name'] == supplier_filter) and \
+                       (start_date <= po_date <= end_date):
+                        filtered_pos.append(po)
+                except (ValueError, KeyError):
+                    continue
+            
+            if not filtered_pos:
+                st.info("No purchase orders match the filters")
+            else:
+                st.subheader("Purchase Orders Summary")
+                po_summary = []
+                for po in filtered_pos:
+                    po_summary.append({
+                        'PO ID': po['po_id'],
+                        'Supplier': po['supplier_name'],
+                        'Date': po['date_created'],
+                        'Items': len(po['items']),
+                        'Total Cost': format_currency(po['total_cost']),
+                        'Status': po['status'].capitalize().replace('_', ' '),
+                        'Created By': po['created_by']
+                    })
+                
+                st.dataframe(pd.DataFrame(po_summary))
+                
+                selected_po = st.selectbox("View PO Details", [""] + [f"{po['po_id']} - {po['supplier_name']}" for po in filtered_pos])
+                
+                if selected_po:
+                    po_id = selected_po.split(" - ")[0]
+                    po = purchase_orders[po_id]
+                    
+                    # Initialize receipts if not exists
+                    if 'receipts' not in po:
+                        po['receipts'] = []
+                    
+                    st.subheader(f"Purchase Order #{po_id}")
+                    st.write(f"Supplier: {po['supplier_name']}")
+                    st.write(f"Date Created: {po['date_created']}")
+                    st.write(f"Created By: {po['created_by']}")
+                    st.write(f"Status: {po['status'].capitalize().replace('_', ' ')}")
+                    st.write(f"Total Cost: {format_currency(po['total_cost'])}")
+                    
+                    st.subheader("Items")
+                    items_df = pd.DataFrame(po['items'])
+                    st.dataframe(items_df)
+                    
+                    if po['receipts']:
+                        st.subheader("Receipt History")
+                        for receipt in po['receipts']:
+                            st.write(f"**{receipt['date']}** by {receipt['received_by']}")
+                            if receipt.get('notes'):
+                                st.write(f"Notes: {receipt['notes']}")
+                            receipt_df = pd.DataFrame(receipt['items'])
+                            st.dataframe(receipt_df)
+                    
+                    if st.button("Print PO"):
+                        po_report = generate_po_report(po_id)
+                        if print_receipt(po_report):
+                            st.success("Purchase order printed successfully")
+                        else:
+                            st.error("Failed to print purchase order")
+
+    with tab3:
+        st.header("Receive Purchase Order")
+        
+        purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+        pending_pos = [po for po in purchase_orders.values() if po.get('status') in ['pending', 'partially_received']]
+        
+        if not pending_pos:
+            st.info("No pending purchase orders to receive")
+        else:
+            selected_po = st.selectbox("Select PO to Receive", [""] + [f"{po['po_id']} - {po['supplier_name']}" for po in pending_pos])
+            
+            if selected_po:
+                po_id = selected_po.split(" - ")[0]
+                po = purchase_orders[po_id]
+                
+                # Initialize receipts if not exists
+                if 'receipts' not in po:
+                    po['receipts'] = []
+                
+                st.subheader(f"Purchase Order #{po_id}")
+                st.write(f"Supplier: {po['supplier_name']}")
+                st.write(f"Date Created: {po['date_created']}")
+                st.write(f"Total Cost: {format_currency(po['total_cost'])}")
+                st.write(f"Current Status: {po['status'].capitalize().replace('_', ' ')}")
+                
+                if po['receipts']:
+                    st.subheader("Previous Receipts")
+                    for receipt in po['receipts']:
+                        st.write(f"**{receipt['date']}** by {receipt['received_by']}")
+                        if receipt.get('notes'):
+                            st.write(f"Notes: {receipt['notes']}")
+                        receipt_df = pd.DataFrame(receipt['items'])
+                        st.dataframe(receipt_df)
+                
+                st.subheader("Receive Items")
+                with st.form("receive_po_form"):
+                    received_items = []
+                    for item in po['items']:
+                        max_qty = item['quantity']
+                        received_qty = st.number_input(
+                            f"Quantity received for {item['name']} (ordered: {max_qty})",
+                            min_value=0,
+                            max_value=max_qty,
+                            value=max_qty,
+                            key=f"receive_{item['barcode']}"
+                        )
+                        received_items.append({
+                            'barcode': item['barcode'],
+                            'name': item['name'],
+                            'ordered_quantity': item['quantity'],
+                            'received_quantity': received_qty,
+                            'cost': item.get('cost', 0)
+                        })
+                    
+                    notes = st.text_area("Receiving Notes")
+                    mark_as_complete = st.checkbox("Mark as complete (even if not all items received)", 
+                                                 value=po['status'] == 'partially_received')
+                    
+                    if st.form_submit_button("Process Receipt"):
+                        if all(item['received_quantity'] == 0 for item in received_items):
+                            st.error("Cannot process receipt with all quantities as zero")
+                        else:
+                            if process_received_po(po_id, received_items, notes, mark_as_complete):
+                                st.success("Receipt processed successfully")
+                                st.rerun()
+                            else:
+                                st.error("Failed to process receipt")
+
+def generate_purchase_order(supplier_id, items):
+    suppliers = load_data(SUPPLIERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    
+    if supplier_id not in suppliers:
+        return None
+    
+    supplier = suppliers[supplier_id]
+    po_id = generate_short_id()
+    
+    # Calculate totals
+    total_cost = 0
+    for item in items:
+        product = products.get(item['barcode'], {})
+        total_cost += item['quantity'] * product.get('cost', 0)
+    
+    # Create PO
+    purchase_orders[po_id] = {
+        'po_id': po_id,
+        'supplier_id': supplier_id,
+        'supplier_name': supplier['name'],
+        'date_created': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'created_by': st.session_state.user_info['username'],
+        'items': items,
+        'total_cost': total_cost,
+        'status': 'pending',
+        'date_received': None,
+        'received_by': None
+    }
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    return po_id
+
+def generate_po_report(po_id):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    settings = load_data(SETTINGS_FILE)
+    
+    if po_id not in purchase_orders:
+        return None
+    
+    po = purchase_orders[po_id]
+    
+    report = f"PURCHASE ORDER #{po_id}\n"
+    report += f"{settings.get('store_name', 'Supermarket POS')}\n"
+    report += f"Date: {po['date_created']}\n"
+    report += "=" * 50 + "\n"
+    report += f"Supplier: {po['supplier_name']}\n"
+    report += f"Created by: {po['created_by']}\n"
+    report += "=" * 50 + "\n"
+    report += "ITEMS:\n"
+    report += "Barcode\tProduct\tQty\tUnit Cost\tTotal\n"
+    
+    for item in po['items']:
+        product = products.get(item['barcode'], {'name': 'Unknown', 'cost': 0})
+        report += f"{item['barcode']}\t{product['name']}\t{item['quantity']}\t"
+        report += f"{format_currency(product.get('cost', 0))}\t"
+        report += f"{format_currency(item['quantity'] * product.get('cost', 0))}\n"
+    
+    report += "=" * 50 + "\n"
+    report += f"TOTAL COST: {format_currency(po['total_cost'])}\n"
+    report += f"STATUS: {po['status'].upper()}\n"
+    
+    if po['status'] == 'received':
+        report += f"Received on: {po['date_received']} by {po['received_by']}\n"
+    
+    return report
+
+def process_received_po(po_id, received_items, notes, mark_as_complete=False):
+    purchase_orders = load_data(PURCHASE_ORDERS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    products = load_data(PRODUCTS_FILE)
+    
+    if po_id not in purchase_orders:
+        return False
+    
+    po = purchase_orders[po_id]
+    
+    if po['status'] == 'received':
+        return True  # Already fully processed
+    
+    # Initialize receipts if not exists
+    if 'receipts' not in po:
+        po['receipts'] = []
+    
+    # Update inventory only for received items
+    for item in received_items:
+        if item['received_quantity'] > 0:
+            barcode = item['barcode']
+            
+            if barcode in inventory:
+                inventory[barcode]['quantity'] += item['received_quantity']
+            else:
+                # Initialize inventory with default values if product doesn't exist in inventory
+                inventory[barcode] = {
+                    'quantity': item['received_quantity'],
+                    'reorder_point': 10,  # Default reorder point
+                    'cost': products.get(barcode, {}).get('cost', 0)  # Get cost from products if available
+                }
+            
+            inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+    
+    # Update PO status
+    if all(item['received_quantity'] == item['ordered_quantity'] for item in received_items):
+        po['status'] = 'received'
+    elif mark_as_complete:
+        po['status'] = 'partially_received'
+    else:
+        po['status'] = 'pending'  # Still waiting for more items
+    
+    # Add receipt details to PO
+    po['receipts'].append({
+        'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'received_by': st.session_state.user_info['username'],
+        'items': received_items,
+        'notes': notes
+    })
+    
+    # Update the PO items if partially received and marked as complete
+    if mark_as_complete and po['status'] == 'partially_received':
+        # Adjust PO items to only include remaining quantities
+        po['items'] = [
+            {
+                'barcode': item['barcode'],
+                'name': item['name'],
+                'quantity': item['ordered_quantity'] - item['received_quantity'],
+                'cost': item['cost']
+            }
+            for item in received_items
+            if item['received_quantity'] < item['ordered_quantity']
+        ]
+    
+    # Update completion info if fully or partially completed
+    if po['status'] in ['received', 'partially_received']:
+        po['date_received'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+        po['received_by'] = st.session_state.user_info['username']
+    
+    save_data(purchase_orders, PURCHASE_ORDERS_FILE)
+    save_data(inventory, INVENTORY_FILE)
+    return True
 # Product Management
 def product_management():
     if not is_manager():
@@ -1468,7 +2203,12 @@ def inventory_management():
     
     st.title("Inventory Management")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Current Inventory", "Stock Adjustment", "Inventory Reports", "Bulk Update"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Current Inventory", 
+        "Stock Adjustment", 
+        "Inventory Reports", 
+        "Bulk Update"
+    ])
     
     with tab1:
         st.header("Current Inventory")
@@ -1497,9 +2237,13 @@ def inventory_management():
             # Filter options
             col1, col2 = st.columns(2)
             with col1:
-                show_low_stock = st.checkbox("Show Only Low Stock Items")
+                show_low_stock = st.checkbox("Show Only Low Stock Items", key="inv_low_stock_filter")
             with col2:
-                sort_by = st.selectbox("Sort By", ["Product Name", "Quantity", "Status"])
+                sort_by = st.selectbox(
+                    "Sort By", 
+                    ["Product Name", "Quantity", "Status"],
+                    key="inv_sort_by"
+                )
             
             if show_low_stock:
                 inventory_df = inventory_df[inventory_df['status'] == 'Low Stock']
@@ -1514,13 +2258,14 @@ def inventory_management():
             st.dataframe(inventory_df)
             
             # Export option
-            if st.button("Export Inventory to CSV"):
+            if st.button("Export Inventory to CSV", key="export_inv_csv"):
                 csv = inventory_df.to_csv(index=False)
                 st.download_button(
                     label="Download CSV",
                     data=csv,
                     file_name=f"inventory_report_{datetime.date.today()}.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    key="inv_download_csv"
                 )
     
     with tab2:
@@ -1531,7 +2276,11 @@ def inventory_management():
             st.info("No products available")
         else:
             product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-            selected_product = st.selectbox("Select Product", [""] + list(product_options.keys()))
+            selected_product = st.selectbox(
+                "Select Product", 
+                [""] + list(product_options.keys()),
+                key="stock_adj_select_product"
+            )
             
             if selected_product:
                 barcode = product_options[selected_product]
@@ -1543,16 +2292,44 @@ def inventory_management():
                 st.write(f"Current Reorder Point: {current_reorder}")
                 
                 with st.form(key=f"adjust_{barcode}"):
-                    adjustment_type = st.radio("Adjustment Type", ["Add Stock", "Remove Stock", "Set Stock", "Transfer Stock"])
+                    adjustment_type = st.radio(
+                        "Adjustment Type", 
+                        ["Add Stock", "Remove Stock", "Set Stock", "Transfer Stock"],
+                        key=f"adj_type_{barcode}"
+                    )
                     
                     if adjustment_type in ["Add Stock", "Remove Stock", "Set Stock"]:
-                        quantity = st.number_input("Quantity", min_value=1, value=1, step=1)
+                        quantity = st.number_input(
+                            "Quantity", 
+                            min_value=1, 
+                            value=1, 
+                            step=1,
+                            key=f"adj_qty_{barcode}"
+                        )
                     else:
-                        quantity = st.number_input("Quantity to Transfer", min_value=1, value=1, step=1)
-                        transfer_to = st.text_input("Transfer To (Location/Branch)")
+                        quantity = st.number_input(
+                            "Quantity to Transfer", 
+                            min_value=1, 
+                            value=1, 
+                            step=1,
+                            key=f"transfer_qty_{barcode}"
+                        )
+                        transfer_to = st.text_input(
+                            "Transfer To (Location/Branch)",
+                            key=f"transfer_to_{barcode}"
+                        )
                     
-                    new_reorder = st.number_input("Reorder Point", min_value=0, value=current_reorder, step=1)
-                    notes = st.text_area("Notes")
+                    new_reorder = st.number_input(
+                        "Reorder Point", 
+                        min_value=0, 
+                        value=current_reorder, 
+                        step=1,
+                        key=f"reorder_{barcode}"
+                    )
+                    notes = st.text_area(
+                        "Notes",
+                        key=f"notes_{barcode}"
+                    )
                     
                     if st.form_submit_button("Submit Adjustment"):
                         if barcode not in inventory:
@@ -1566,13 +2343,11 @@ def inventory_management():
                             inventory[barcode]['quantity'] = quantity
                         elif adjustment_type == "Transfer Stock":
                             inventory[barcode]['quantity'] -= quantity
-                            # Note: In a full system, we'd update the destination inventory too
                         
                         inventory[barcode]['reorder_point'] = new_reorder
                         inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
                         inventory[barcode]['updated_by'] = st.session_state.user_info['username']
                         
-                        # Record adjustment
                         adjustments = inventory[barcode].get('adjustments', [])
                         adjustments.append({
                             'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1597,56 +2372,58 @@ def inventory_management():
         if not inventory:
             st.info("No inventory data available")
         else:
-            report_type = st.selectbox("Inventory Report Type", [
-                "Stock Value Report",
-                "Low Stock Report",
-                "Stock Movement Report",
-                "Inventory Audit"
-            ])
+            report_type = st.selectbox(
+                "Inventory Report Type", 
+                [
+                    "Stock Levels",
+                    "Stock Value",
+                    "Stock Movement",
+                    "Inventory Audit"
+                ],
+                key="inv_report_type"
+            )
             
-            if report_type == "Stock Value Report":
-                # Calculate total value of inventory
-                total_value = 0
-                report_data = []
-                
+            if report_type == "Stock Levels":
+                inventory_list = []
                 for barcode, inv_data in inventory.items():
-                    product = products.get(barcode, {'name': 'Unknown', 'cost': 0})
-                    value = inv_data.get('quantity', 0) * product.get('cost', 0)
-                    total_value += value
-                    report_data.append({
-                        'Product': product['name'],
-                        'Barcode': barcode,
-                        'Quantity': inv_data.get('quantity', 0),
-                        'Unit Cost': product.get('cost', 0),
-                        'Total Value': value
+                    product = products.get(barcode, {'name': 'Unknown'})
+                    inventory_list.append({
+                        'product': product['name'],
+                        'barcode': barcode,
+                        'quantity': inv_data.get('quantity', 0),
+                        'reorder_point': inv_data.get('reorder_point', 10)
                     })
                 
-                st.write(f"Total Inventory Value: {format_currency(total_value)}")
-                st.dataframe(pd.DataFrame(report_data))
+                inv_df = pd.DataFrame(inventory_list)
+                st.dataframe(inv_df)
             
-            elif report_type == "Low Stock Report":
-                low_stock_items = []
-                
+            elif report_type == "Stock Value":
+                value_list = []
                 for barcode, inv_data in inventory.items():
-                    if inv_data.get('quantity', 0) < inv_data.get('reorder_point', 10):
-                        product = products.get(barcode, {'name': 'Unknown'})
-                        low_stock_items.append({
-                            'Product': product['name'],
-                            'Barcode': barcode,
-                            'Current Stock': inv_data.get('quantity', 0),
-                            'Reorder Point': inv_data.get('reorder_point', 10)
-                        })
+                    product = products.get(barcode, {'name': 'Unknown', 'cost': 0})
+                    value_list.append({
+                        'product': product['name'],
+                        'barcode': barcode,
+                        'quantity': inv_data.get('quantity', 0),
+                        'unit_cost': product.get('cost', 0),
+                        'total_value': inv_data.get('quantity', 0) * product.get('cost', 0)
+                    })
                 
-                if low_stock_items:
-                    st.dataframe(pd.DataFrame(low_stock_items))
-                else:
-                    st.info("No low stock items")
+                value_df = pd.DataFrame(value_list)
+                total_value = value_df['total_value'].sum()
+                
+                st.write(f"Total Inventory Value: {format_currency(total_value)}")
+                st.dataframe(value_df.sort_values('total_value', ascending=False))
             
-            elif report_type == "Stock Movement Report":
-                st.info("Select a product to view its movement history")
+            elif report_type == "Stock Movement":
+                st.info("Select a product to view movement history")
                 
                 product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                selected_product = st.selectbox("Select Product", [""] + list(product_options.keys()))
+                selected_product = st.selectbox(
+                    "Select Product", 
+                    [""] + list(product_options.keys()),
+                    key="movement_select_product"
+                )
                 
                 if selected_product:
                     barcode = product_options[selected_product]
@@ -1660,7 +2437,7 @@ def inventory_management():
             
             elif report_type == "Inventory Audit":
                 st.info("Inventory audit would compare physical counts with system records")
-                if st.button("Generate Audit Sheet"):
+                if st.button("Generate Audit Sheet", key="gen_audit_sheet"):
                     audit_data = []
                     for barcode, inv_data in inventory.items():
                         product = products.get(barcode, {'name': 'Unknown'})
@@ -1681,7 +2458,8 @@ def inventory_management():
                         label="Download Audit Sheet",
                         data=csv,
                         file_name=f"inventory_audit_{datetime.date.today()}.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        key="download_audit"
                     )
     
     with tab4:
@@ -1701,17 +2479,22 @@ def inventory_management():
             label="Download Template",
             data=template_df.to_csv(index=False).encode('utf-8'),
             file_name="inventory_update_template.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="dl_inv_template"
         )
         
-        uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+        uploaded_file = st.file_uploader(
+            "Upload CSV file", 
+            type=['csv'],
+            key="inv_upload_csv"
+        )
         
         if uploaded_file:
             try:
                 df = pd.read_csv(uploaded_file)
                 st.dataframe(df)
                 
-                if st.button("Update Inventory"):
+                if st.button("Update Inventory", key="inv_update_btn"):
                     inventory = load_data(INVENTORY_FILE)
                     products = load_data(PRODUCTS_FILE)
                     updated = 0
@@ -2223,6 +3006,7 @@ def discounts_management():
                     st.success(f"Import completed: {imported} new discounts, {errors} errors")
             except Exception as e:
                 st.error(f"Error reading CSV file: {str(e)}")
+
 
 # Offers Management
 def offers_management():
@@ -2991,18 +3775,21 @@ def reports_analytics():
             with col2:
                 end_date = st.date_input("End Date", value=datetime.date.today())
             
-            # Convert transactions to DataFrame
+            # Convert transactions to DataFrame with error handling
             trans_list = []
             for t in transactions.values():
-                trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                if start_date <= trans_date <= end_date:
-                    trans_list.append({
-                        'date': t['date'],
-                        'transaction_id': t['transaction_id'],
-                        'total': t['total'],
-                        'cashier': t['cashier'],
-                        'payment_method': t['payment_method']
-                    })
+                try:
+                    trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                    if start_date <= trans_date <= end_date:
+                        trans_list.append({
+                            'date': t['date'],
+                            'transaction_id': t.get('transaction_id', 'N/A'),
+                            'total': t.get('total', 0),
+                            'cashier': t.get('cashier', 'N/A'),
+                            'payment_method': t.get('payment_method', 'N/A')
+                        })
+                except (ValueError, KeyError, AttributeError):
+                    continue
             
             if not trans_list:
                 st.info("No transactions in selected date range")
@@ -3050,23 +3837,25 @@ def reports_analytics():
                     st.area_chart(report_df['total'])
                 
                 elif report_type == "Product Sales":
-                    # Product sales analysis
                     products = load_data(PRODUCTS_FILE)
                     product_sales = {}
                     
                     for t in transactions.values():
-                        trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                        if start_date <= trans_date <= end_date:
-                            for barcode, item in t['items'].items():
-                                if barcode not in product_sales:
-                                    product_sales[barcode] = {
-                                        'name': products.get(barcode, {}).get('name', 'Unknown'),
-                                        'quantity': 0,
-                                        'revenue': 0.0
-                                    }
-                                
-                                product_sales[barcode]['quantity'] += item['quantity']
-                                product_sales[barcode]['revenue'] += item['price'] * item['quantity']
+                        try:
+                            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                            if start_date <= trans_date <= end_date:
+                                for barcode, item in t.get('items', {}).items():
+                                    if barcode not in product_sales:
+                                        product_sales[barcode] = {
+                                            'name': products.get(barcode, {}).get('name', 'Unknown'),
+                                            'quantity': 0,
+                                            'revenue': 0.0
+                                        }
+                                    
+                                    product_sales[barcode]['quantity'] += item.get('quantity', 0)
+                                    product_sales[barcode]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                        except (ValueError, KeyError, AttributeError):
+                            continue
                     
                     if not product_sales:
                         st.info("No product sales in selected date range")
@@ -3082,7 +3871,6 @@ def reports_analytics():
                         st.bar_chart(sales_df.head(top_n)['revenue'])
                 
                 elif report_type == "Category Sales":
-                    # Category sales analysis
                     products = load_data(PRODUCTS_FILE)
                     categories = load_data(CATEGORIES_FILE).get('categories', [])
                     category_sales = {}
@@ -3091,17 +3879,20 @@ def reports_analytics():
                         category_sales[cat] = {'revenue': 0.0, 'quantity': 0}
                     
                     for t in transactions.values():
-                        trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                        if start_date <= trans_date <= end_date:
-                            for barcode, item in t['items'].items():
-                                product = products.get(barcode, {})
-                                category = product.get('category', 'Unknown')
-                                
-                                if category not in category_sales:
-                                    category_sales[category] = {'revenue': 0.0, 'quantity': 0}
-                                
-                                category_sales[category]['quantity'] += item['quantity']
-                                category_sales[category]['revenue'] += item['price'] * item['quantity']
+                        try:
+                            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                            if start_date <= trans_date <= end_date:
+                                for barcode, item in t.get('items', {}).items():
+                                    product = products.get(barcode, {})
+                                    category = product.get('category', 'Unknown')
+                                    
+                                    if category not in category_sales:
+                                        category_sales[category] = {'revenue': 0.0, 'quantity': 0}
+                                    
+                                    category_sales[category]['quantity'] += item.get('quantity', 0)
+                                    category_sales[category]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                        except (ValueError, KeyError, AttributeError):
+                            continue
                     
                     if not category_sales:
                         st.info("No category sales in selected date range")
@@ -3116,22 +3907,24 @@ def reports_analytics():
                         st.bar_chart(sales_df['revenue'])
                 
                 elif report_type == "Cashier Performance":
-                    # Cashier performance analysis
                     cashier_performance = {}
                     
                     for t in transactions.values():
-                        trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                        if start_date <= trans_date <= end_date:
-                            cashier = t['cashier']
-                            if cashier not in cashier_performance:
-                                cashier_performance[cashier] = {
-                                    'transactions': 0,
-                                    'total_sales': 0.0,
-                                    'avg_sale': 0.0
-                                }
-                            
-                            cashier_performance[cashier]['transactions'] += 1
-                            cashier_performance[cashier]['total_sales'] += t['total']
+                        try:
+                            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                            if start_date <= trans_date <= end_date:
+                                cashier = t.get('cashier', 'Unknown')
+                                if cashier not in cashier_performance:
+                                    cashier_performance[cashier] = {
+                                        'transactions': 0,
+                                        'total_sales': 0.0,
+                                        'avg_sale': 0.0
+                                    }
+                                
+                                cashier_performance[cashier]['transactions'] += 1
+                                cashier_performance[cashier]['total_sales'] += t.get('total', 0)
+                        except (ValueError, KeyError, AttributeError):
+                            continue
                     
                     for cashier, data in cashier_performance.items():
                         if data['transactions'] > 0:
@@ -3175,7 +3968,6 @@ def reports_analytics():
             ])
             
             if report_type == "Stock Levels":
-                # Current stock levels
                 inventory_list = []
                 for barcode, inv_data in inventory.items():
                     product = products.get(barcode, {'name': 'Unknown'})
@@ -3190,7 +3982,6 @@ def reports_analytics():
                 st.dataframe(inv_df)
             
             elif report_type == "Stock Value":
-                # Stock value report
                 value_list = []
                 for barcode, inv_data in inventory.items():
                     product = products.get(barcode, {'name': 'Unknown', 'cost': 0})
@@ -3209,7 +4000,6 @@ def reports_analytics():
                 st.dataframe(value_df.sort_values('total_value', ascending=False))
             
             elif report_type == "Stock Movement":
-                # Stock movement report
                 st.info("Select a product to view movement history")
                 
                 product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
@@ -3267,7 +4057,6 @@ def reports_analytics():
                 "Customer Segmentation"
             ])
             
-            # Date range filter
             col1, col2 = st.columns(2)
             with col1:
                 start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="cust_start_date")
@@ -3275,7 +4064,6 @@ def reports_analytics():
                 end_date = st.date_input("End Date", value=datetime.date.today(), key="cust_end_date")
             
             if report_type == "Customer Spending":
-                # Customer spending analysis
                 customer_spending = {}
                 
                 for cust_id, customer in customers.items():
@@ -3288,12 +4076,15 @@ def reports_analytics():
                     }
                 
                 for t in transactions.values():
-                    trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                    if 'customer_id' in t and start_date <= trans_date <= end_date:
-                        cust_id = t['customer_id']
-                        if cust_id in customer_spending:
-                            customer_spending[cust_id]['transactions'] += 1
-                            customer_spending[cust_id]['total_spent'] += t['total']
+                    try:
+                        trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                        if 'customer_id' in t and start_date <= trans_date <= end_date:
+                            cust_id = t['customer_id']
+                            if cust_id in customer_spending:
+                                customer_spending[cust_id]['transactions'] += 1
+                                customer_spending[cust_id]['total_spent'] += t.get('total', 0)
+                    except (ValueError, KeyError, AttributeError):
+                        continue
                 
                 for cust_id, data in customer_spending.items():
                     if data['transactions'] > 0:
@@ -3313,7 +4104,6 @@ def reports_analytics():
                     st.bar_chart(spending_df.head(top_n)['total_spent'])
             
             elif report_type == "Loyalty Members":
-                # Loyalty members report
                 loyalty_df = pd.DataFrame.from_dict(customers, orient='index')
                 st.dataframe(loyalty_df[['name', 'email', 'points', 'tier']].sort_values('points', ascending=False))
             
@@ -3329,25 +4119,26 @@ def reports_analytics():
         if not transactions:
             st.info("No transaction data available")
         else:
-            # Date range filter
             col1, col2 = st.columns(2)
             with col1:
                 start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="pay_start_date")
             with col2:
                 end_date = st.date_input("End Date", value=datetime.date.today(), key="pay_end_date")
             
-            # Payment method analysis
             payment_methods = {}
             
             for t in transactions.values():
-                trans_date = datetime.datetime.strptime(t['date'], "%Y-%m-%d %H:%M:%S").date()
-                if start_date <= trans_date <= end_date:
-                    method = t['payment_method']
-                    if method not in payment_methods:
-                        payment_methods[method] = {'count': 0, 'total': 0.0}
-                    
-                    payment_methods[method]['count'] += 1
-                    payment_methods[method]['total'] += t['total']
+                try:
+                    trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                    if start_date <= trans_date <= end_date:
+                        method = t.get('payment_method', 'Unknown')
+                        if method not in payment_methods:
+                            payment_methods[method] = {'count': 0, 'total': 0.0}
+                        
+                        payment_methods[method]['count'] += 1
+                        payment_methods[method]['total'] += t.get('total', 0)
+                except (ValueError, KeyError, AttributeError):
+                    continue
             
             if not payment_methods:
                 st.info("No payment data in selected date range")
