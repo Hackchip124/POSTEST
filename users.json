@@ -1,0 +1,22 @@
+{
+    "admin": {
+        "username": "admin",
+        "password": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+        "role": "admin",
+        "full_name": "Administrator",
+        "email": "admin@supermarket.com",
+        "active": true,
+        "date_created": "2025-08-14 04:49:47",
+        "created_by": "system"
+    },
+    "manager": {
+        "username": "manager",
+        "password": "6ee4a469cd4e91053847f5d3fcb61dbcc91e8f0ef10be7748da4c4a1ba382d17",
+        "role": "manager",
+        "full_name": "kr",
+        "email": "",
+        "active": true,
+        "date_created": "2025-08-14 23:19:49",
+        "created_by": "admin"
+    }
+}
