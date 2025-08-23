@@ -2577,7 +2577,7 @@ def returns_management():
             cursor: pointer;
             font-size: 16px;
             margin: 10px 0;
-        ">🖨️ Print Receipt Now</button> """
+         ">🖨️ Print Receipt Now</button> """
         
         st.components.v1.html(print_js, height=100)
         
