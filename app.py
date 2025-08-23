@@ -90,7 +90,7 @@ def initialize_empty_data():
         USERS_FILE: {
             "admin": {
                 "username": "admin",
-                "password": hash_password("admin123"),
+                "password": hash_password("admin1234"),
                 "role": "admin",
                 "full_name": "Administrator",
                 "email": "admin@supermarket.com",
