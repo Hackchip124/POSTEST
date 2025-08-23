@@ -9,3 +9,15 @@ fpdf2==2.7.7
 python-dateutil==2.8.2
 opencv-python-headless==4.8.1.78
 pyserial
+streamlit==1.32.0
+streamlit-option-menu==0.3.6
+Pillow==10.0.1
+opencv-python-headless==4.8.0.76
+numpy==1.24.3
+pyzbar==0.1.9
+pandas==2.0.3
+matplotlib==3.7.2
+plotly==5.15.0
+reportlab==4.0.4
+python-dateutil==2.8.2
+serial
