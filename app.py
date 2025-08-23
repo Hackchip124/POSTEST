@@ -2537,49 +2537,8 @@ def returns_management():
         # Display the receipt content
         st.text_area("Receipt Content", st.session_state.print_receipt, height=300)
         
-        # Create a simple print button using HTML/JS
-        print_js = f"""
-        <script>
-        function printReceipt() {{
-            var content = `{st.session_state.print_receipt.replace('`', '\\`')}`;
-            var printWindow = window.open('', '_blank');
-            printWindow.document.write(`
-                <html>
-                <head>
-                    <title>Print Receipt</title>
-                    <style>
-                        body {{ font-family: monospace; font-size: 12px; line-height: 1.2; }}
-                        @media print {{
-                            body {{ margin: 0; padding: 10px; }}
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <pre>${{content}}</pre>
-                    <script>
-                        window.onload = function() {{
-                            window.print();
-                            setTimeout(function() {{ window.close(); }}, 100);
-                        }};
-                    <\/script>
-                </body>
-                </html>
-            `);
-            printWindow.document.close();
-        }}
-        </script>
-        <button onclick="printReceipt()" style="
-            background-color: #4CAF50;
-            color: white;
-            padding: 12px 24px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            margin: 10px 0;
-         ">🖨️ Print Receipt Now</button> """
         
-        st.components.v1.html(print_js, height=100)
+        
         
         # Download option
         st.download_button(
