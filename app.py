@@ -85,12 +85,41 @@ def save_data(data, file):
         json.dump(data, f, indent=4)
 
 # Initialize empty data files if they don't exist
+def ensure_default_user():
+    """Ensure the default admin user exists"""
+    users = load_data(USERS_FILE)
+    
+    # Check if admin user exists and has correct password
+    if "admin" not in users:
+        # Create default admin user
+        users["admin"] = {
+            "username": "admin",
+            "password": hash_password("admin123"),
+            "role": "admin",
+            "full_name": "Administrator",
+            "email": "admin@supermarket.com",
+            "active": True,
+            "date_created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_by": "system"
+        }
+        save_data(users, USERS_FILE)
+        print("Default admin user created")
+    elif users["admin"]["password"] != hash_password("admin123"):
+        # Reset password to default if it's been changed
+        users["admin"]["password"] = hash_password("admin123")
+        save_data(users, USERS_FILE)
+        print("Admin password reset to default")
+
 def initialize_empty_data():
+    """Initialize all data files with default values"""
+    # Ensure data directory exists
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
     default_data = {
         USERS_FILE: {
             "admin": {
                 "username": "admin",
-                "password": hash_password("admin1234"),
+                "password": hash_password("admin123"),
                 "role": "admin",
                 "full_name": "Administrator",
                 "email": "admin@supermarket.com",
@@ -161,10 +190,14 @@ def initialize_empty_data():
     
     for file, data in default_data.items():
         if not os.path.exists(file):
+            # Create parent directories if they don't exist
+            os.makedirs(os.path.dirname(file), exist_ok=True)
             with open(file, 'w') as f:
                 json.dump(data, f, indent=4)
+            print(f"Created {file} with default data")
 
-# Add to session state initialization
+
+# Add to session state initialization 
 if 'outdoor_cart' not in st.session_state:
     st.session_state.outdoor_cart = {}
 if 'selected_brand' not in st.session_state:
@@ -8234,6 +8267,11 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    
+    # Initialize data directories and files FIRST
+    initialize_empty_data()
+    ensure_default_user()
+
     
     # Apply theme from settings
     settings = load_data(SETTINGS_FILE)
